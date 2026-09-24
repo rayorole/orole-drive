@@ -14,7 +14,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Spinner } from "@/components/spinner";
-import { DriveFileIcon, fileType, formatBytes } from "@/components/drive-item";
+import { fileType, formatBytes } from "@/components/drive-item";
+import { DriveFileIcon } from "@/components/drive-file-icon";
 import { PdfPreview } from "@/components/pdf-preview";
 
 export function useDriveDownload() {

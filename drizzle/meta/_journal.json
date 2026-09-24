@@ -8,6 +8,13 @@
       "when": 1790282441718,
       "tag": "0000_overconfident_the_anarchist",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1790284891641,
+      "tag": "0001_sticky_mindworm",
+      "breakpoints": true
     }
   ]
 }

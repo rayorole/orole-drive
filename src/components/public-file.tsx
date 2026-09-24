@@ -2,12 +2,13 @@
 
 import { useRef, useState, type SyntheticEvent } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { Download, File, RefreshCw } from "lucide-react";
+import { Download, RefreshCw } from "lucide-react";
 import { getPublicAccess } from "@/app/actions/public";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/spinner";
 import type { DriveItem } from "@/lib/drive-types";
 import { PdfPreview } from "@/components/pdf-preview";
+import { DriveFileIcon } from "@/components/drive-file-icon";
 
 export function PublicFile({ item, token, previewUrl: initialPreview }: { item: DriveItem; token: string; previewUrl: string | null }) {
   const [previewUrl, setPreviewUrl] = useState(initialPreview);
@@ -35,7 +36,7 @@ export function PublicFile({ item, token, previewUrl: initialPreview }: { item: 
   return <div className="flex w-full flex-col gap-6">
     <div className="flex min-h-64 items-center justify-center overflow-hidden rounded-2xl bg-muted p-4 sm:min-h-80 sm:p-8">
       {!previewUrl || previewError ? <div className="flex flex-col items-center gap-4 text-center">
-        <File className="size-14 text-muted-foreground" strokeWidth={1.2} aria-hidden="true" />
+        <DriveFileIcon item={item} large />
         <p className="text-sm text-muted-foreground">{previewError ? "The preview couldn’t load." : "Download this file to open it."}</p>
         {previewError && <Button variant="outline" onClick={() => access.mutate("preview")} disabled={access.isPending}><RefreshCw data-icon="inline-start" />Reload preview</Button>}
       </div> : item.mimeType?.startsWith("image/") ?
@@ -43,7 +44,7 @@ export function PublicFile({ item, token, previewUrl: initialPreview }: { item: 
         // eslint-disable-next-line @next/next/no-img-element
         <img src={previewUrl} alt={item.name} className="max-h-[60dvh] max-w-full rounded-lg object-contain" onError={() => setPreviewError(true)} />
       : item.mimeType?.startsWith("video/") ? <video src={previewUrl} controls playsInline preload="metadata" className="max-h-[60dvh] w-full" onError={mediaError} onLoadedMetadata={restorePlayback} onPlay={() => { playback.current.paused = false; }} onPause={(event) => { if (!event.currentTarget.error) playback.current.paused = true; }} aria-label={item.name} />
-      : item.mimeType?.startsWith("audio/") ? <audio src={previewUrl} controls preload="metadata" className="w-full" onError={mediaError} onLoadedMetadata={restorePlayback} onPlay={() => { playback.current.paused = false; }} onPause={(event) => { if (!event.currentTarget.error) playback.current.paused = true; }} aria-label={item.name} />
+      : item.mimeType?.startsWith("audio/") ? <div className="flex w-full flex-col items-center gap-8"><DriveFileIcon item={item} large /><audio src={previewUrl} controls preload="metadata" className="w-full" onError={mediaError} onLoadedMetadata={restorePlayback} onPlay={() => { playback.current.paused = false; }} onPause={(event) => { if (!event.currentTarget.error) playback.current.paused = true; }} aria-label={item.name} /></div>
       : <PdfPreview url={previewUrl} name={item.name} onError={() => setPreviewError(true)} />}
     </div>
     <div className="flex flex-col items-center gap-3">

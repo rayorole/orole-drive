@@ -5,16 +5,20 @@ import { and, asc, count, desc, eq, ilike, isNotNull, isNull, sql, type SQL } fr
 import { z } from "zod";
 import { FamilyAuthError, requireFamily } from "@/lib/auth";
 import { getDb, type Database, type DriveTransaction as Transaction } from "@/lib/db";
-import { driveItems } from "@/lib/drive-schema";
+import { driveItems, type DriveRow } from "@/lib/drive-schema";
 import {
   MAX_UPLOAD_BYTES,
+  MULTIPART_THRESHOLD_BYTES,
   type ActionResult,
   type DriveFilter,
   type DriveItem,
   type DriveListing,
+  type UploadTicket,
 } from "@/lib/drive-types";
 import {
+  abortMultipartUpload,
   commitUpload,
+  createMultipartUpload,
   createObjectKey,
   createPublicToken,
   DriveError,
@@ -151,7 +155,7 @@ export async function beginUpload(input: {
   size: number;
   mimeType: string;
   parentId?: string | null;
-}): Promise<ActionResult<{ id: string; url: string; headers: Record<string, string> }>> {
+}): Promise<ActionResult<UploadTicket>> {
   return familyAction(async () => {
     const { name, size, mimeType, parentId } = z.object({
       name: nameSchema,
@@ -160,14 +164,25 @@ export async function beginUpload(input: {
       parentId: parentSchema,
     }).parse(input);
     await pruneExpiredUploads();
-    return getDb().transaction(async (tx) => {
-      await lockParent(tx, parentId);
-      const id = randomUUID();
-      const [row] = await tx.insert(driveItems).values({
-        id, name, size, mimeType, parentId, kind: "file", state: "pending", objectKey: createObjectKey(id),
-      }).returning();
-      return signUpload(row);
-    });
+    let multipartRow: DriveRow | undefined;
+    try {
+      return await getDb().transaction(async (tx) => {
+        await lockParent(tx, parentId);
+        const id = randomUUID();
+        const [row] = await tx.insert(driveItems).values({
+          id, name, size, mimeType, parentId, kind: "file", state: "pending", objectKey: createObjectKey(id),
+        }).returning();
+        if (size < MULTIPART_THRESHOLD_BYTES) return signUpload(row);
+        const multipartUploadId = await createMultipartUpload(row);
+        multipartRow = { ...row, multipartUploadId };
+        await tx.update(driveItems).set({ multipartUploadId }).where(eq(driveItems.id, id));
+        return signUpload(multipartRow);
+      });
+    } catch (error) {
+      // The transaction may fail after R2 creation, signing, or even during commit.
+      if (multipartRow) await abortMultipartUpload(multipartRow);
+      throw error;
+    }
   });
 }
 

@@ -1,11 +1,10 @@
 "use client";
 
 import {
-  Archive, Code2, Download, File, FileImage, FileMusic, FileText,
-  FileVideo, Folder, Link2, MoreHorizontal, Pencil, Trash2,
+  Download, Link2, MoreHorizontal, Pencil, Trash2,
 } from "lucide-react";
 import type { DriveItem } from "@/lib/drive-types";
-import { cn } from "@/lib/utils";
+import { DriveFileIcon } from "@/components/drive-file-icon";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem,
@@ -23,29 +22,6 @@ export function fileType(item: Pick<DriveItem, "name" | "kind" | "mimeType">) {
   if (item.kind === "folder") return "Folder";
   const extension = item.name.split(".").pop();
   return extension && extension !== item.name ? `${extension.toUpperCase()} file` : "File";
-}
-
-export function DriveFileIcon({ item, large = false }: {
-  item: Pick<DriveItem, "name" | "kind" | "mimeType">;
-  large?: boolean;
-}) {
-  const mime = item.mimeType ?? "";
-  const Icon = item.kind === "folder" ? Folder
-    : mime.startsWith("image/") ? FileImage
-    : mime.startsWith("video/") ? FileVideo
-    : mime.startsWith("audio/") ? FileMusic
-    : /zip|compressed|archive|tar/.test(mime) ? Archive
-    : /json|javascript|xml|html/.test(mime) ? Code2
-    : mime.startsWith("text/") || mime === "application/pdf" ? FileText : File;
-  return (
-    <span aria-hidden="true" className={cn(
-      "inline-flex shrink-0 items-center justify-center",
-      large ? "size-20" : "size-8 rounded-lg bg-muted/65",
-      item.kind === "folder" || mime.startsWith("image/") ? "text-primary" : "text-muted-foreground",
-    )}>
-      <Icon className={cn(large ? "size-[4.5rem]" : "size-5", item.kind === "folder" && "fill-primary/20")} strokeWidth={large ? 1.2 : 1.6} />
-    </span>
-  );
 }
 
 export type DriveItemAction = "rename" | "delete" | "share" | "download";
@@ -110,9 +86,9 @@ export function DriveItems({ items, view, onOpen, onAction }: {
           </tr>
         </thead>
         <tbody>
-          {items.map((item) => <tr key={item.id} className="group border-b border-border/45 last:border-0 hover:bg-accent/40">
+          {items.map((item) => <tr key={item.id} className="group border-b border-border/45 last:border-0 hover:bg-accent/40 focus-within:bg-accent/40 active:bg-accent/60">
             <td className="p-0">
-              <button onClick={() => onOpen(item)} className="flex w-full min-w-0 items-center gap-3 rounded-lg py-2.5 pl-3 pr-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:bg-accent">
+              <button onClick={() => onOpen(item)} className="flex w-full min-w-0 items-center gap-3 rounded-lg bg-transparent py-2.5 pl-3 pr-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
                 <DriveFileIcon item={item} />
                 <span className="min-w-0">
                   <span className="flex items-center gap-2">

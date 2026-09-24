@@ -10,23 +10,26 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { OtpInput } from "@/components/ui/otp-input";
 
 export function LoginForm() {
   const router = useRouter();
   const [step, setStep] = useState<"email" | "code">("email");
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
+  const [codeGeneration, setCodeGeneration] = useState(0);
+  const [verified, setVerified] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [cooldown, setCooldown] = useState(0);
   const [operation, setOperation] = useState<"send" | "verify">("send");
   const [pending, startTransition] = useTransition();
   const emailRef = useRef<HTMLInputElement>(null);
-  const codeRef = useRef<HTMLInputElement>(null);
+  const codeRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (pending) return;
-    if (step === "code") codeRef.current?.focus();
+    if (step === "code") codeRef.current?.querySelector("input")?.focus();
     else emailRef.current?.focus();
   }, [step, pending]);
 
@@ -50,6 +53,8 @@ export function LoginForm() {
         }
         setEmail(normalizedEmail);
         setCode("");
+        setCodeGeneration((generation) => generation + 1);
+        setVerified(false);
         setCooldown(60);
         setStep("code");
         setNotice("Code sent. Check your inbox and spam folder.");
@@ -66,6 +71,7 @@ export function LoginForm() {
       sendCode();
       return;
     }
+    if (!/^\d{6}$/.test(code)) return;
     setError("");
     setNotice("");
     setOperation("verify");
@@ -76,6 +82,7 @@ export function LoginForm() {
           setError(result.error);
           return;
         }
+        setVerified(true);
         router.replace("/");
         router.refresh();
       } catch {
@@ -125,25 +132,22 @@ export function LoginForm() {
               </Field>
             ) : (
               <Field data-invalid={Boolean(error)} data-disabled={pending}>
-                <FieldLabel htmlFor="family-code">Sign-in code</FieldLabel>
-                <Input
+                <FieldLabel id="code-label" htmlFor="family-code-0">Sign-in code</FieldLabel>
+                <OtpInput
+                  key={codeGeneration}
                   ref={codeRef}
                   id="family-code"
-                  name="code"
-                  type="text"
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  pattern="[0-9]{6}"
-                  placeholder="000000"
-                  required
-                  minLength={6}
-                  maxLength={6}
+                  role="group"
+                  aria-labelledby="code-label"
+                  length={6}
+                  size="md"
+                  type="numbers"
+                  autoFocus
                   disabled={pending}
-                  value={code}
-                  onChange={(event) => { setCode(event.target.value.replace(/\D/g, "").slice(0, 6)); setError(""); }}
-                  aria-invalid={Boolean(error)}
+                  status={error ? "error" : verified ? "success" : "idle"}
+                  onChange={(nextCode) => { setCode(nextCode); setError(""); setVerified(false); }}
                   aria-describedby={error ? "code-help login-error" : "code-help"}
-                  className="h-12"
+                  className="w-full"
                 />
                 <FieldDescription id="code-help">Your code expires in 10 minutes. Use the most recent one.</FieldDescription>
               </Field>
@@ -155,7 +159,7 @@ export function LoginForm() {
               </Alert>
             )}
             <Button type="submit" size="lg" disabled={pending || (step === "code" && code.length !== 6)} className="h-12 w-full">
-              {pending ? <><span aria-hidden="true"><Spinner /></span>{operation === "send" ? "Sending code…" : "Signing in…"}</> : <>{step === "email" ? "Send sign-in code" : "Open my drive"}<ArrowRight data-icon="inline-end" aria-hidden="true" /></>}
+              {pending ? <><span aria-hidden="true" className="inline-flex items-center justify-center"><Spinner /></span>{operation === "send" ? "Sending code…" : "Signing in…"}</> : <>{step === "email" ? "Send sign-in code" : "Open my drive"}<ArrowRight data-icon="inline-end" aria-hidden="true" /></>}
             </Button>
           </FieldGroup>
         </form>

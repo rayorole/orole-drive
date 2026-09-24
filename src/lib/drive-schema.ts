@@ -23,6 +23,7 @@ export const driveItems = pgTable(
     size: bigint("size", { mode: "number" }).notNull().default(0),
     mimeType: varchar("mime_type", { length: 127 }),
     objectKey: varchar("object_key", { length: 128 }).unique(),
+    multipartUploadId: text("multipart_upload_id"),
     etag: text("etag"),
     state: text("state", { enum: ["pending", "complete"] }).notNull(),
     publicToken: varchar("public_token", { length: 43 }).unique(),

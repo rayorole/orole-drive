@@ -2,21 +2,27 @@ import "server-only";
 
 import { randomBytes } from "node:crypto";
 import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
   CopyObjectCommand,
+  CreateMultipartUploadCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  ListPartsCommand,
   PutObjectCommand,
   S3Client,
+  UploadPartCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { and, eq, lte, sql } from "drizzle-orm";
 import { getDb } from "@/lib/db";
 import { driveItems, type DriveRow } from "@/lib/drive-schema";
-import type { DriveItem } from "@/lib/drive-types";
+import { MULTIPART_PART_BYTES, type DriveItem, type UploadTicket } from "@/lib/drive-types";
 
 const DOWNLOAD_TTL_SECONDS = 60;
 const UPLOAD_TTL_SECONDS = 60 * 60;
+const MULTIPART_UPLOAD_TTL_SECONDS = 24 * 60 * 60;
 const PUBLIC_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const PREVIEW_TYPES: Record<string, true> = {
   "image/jpeg": true, "image/png": true, "image/gif": true, "image/webp": true, "image/avif": true, "image/bmp": true,
@@ -90,11 +96,60 @@ function stagedObjectKey(row: DriveRow) {
   return `uploads/${objectKey(row).slice("files/".length)}`;
 }
 
-export async function signUpload(row: DriveRow) {
+export async function createMultipartUpload(row: DriveRow): Promise<string> {
   if (row.state !== "pending" || !row.mimeType) {
     throw new DriveError("This upload is no longer available.");
   }
   const { client, bucket } = storage();
+  const upload = await client.send(new CreateMultipartUploadCommand({
+    Bucket: bucket,
+    Key: objectKey(row),
+    ContentType: row.mimeType,
+    Metadata: { "upload-id": row.id },
+  }));
+  if (!upload.UploadId) throw new DriveError("File storage could not start the upload. Please try again.");
+  return upload.UploadId;
+}
+
+export async function abortMultipartUpload(row: DriveRow) {
+  if (!row.multipartUploadId) return;
+  const { client, bucket } = storage();
+  try {
+    await client.send(new AbortMultipartUploadCommand({
+      Bucket: bucket,
+      Key: objectKey(row),
+      UploadId: row.multipartUploadId,
+    }));
+  } catch (error) {
+    if (!(error instanceof Error && error.name === "NoSuchUpload")) throw error;
+  }
+}
+
+export async function signUpload(row: DriveRow): Promise<UploadTicket> {
+  if (row.state !== "pending" || !row.mimeType) {
+    throw new DriveError("This upload is no longer available.");
+  }
+  const { client, bucket } = storage();
+  if (row.multipartUploadId) {
+    const key = objectKey(row);
+    const uploadId = row.multipartUploadId;
+    const partCount = Math.ceil(row.size / MULTIPART_PART_BYTES);
+    const parts = await Promise.all(Array.from({ length: partCount }, async (_, index) => {
+      const partNumber = index + 1;
+      const url = await getSignedUrl(client, new UploadPartCommand({
+        Bucket: bucket,
+        Key: key,
+        UploadId: uploadId,
+        PartNumber: partNumber,
+        ContentLength: Math.min(MULTIPART_PART_BYTES, row.size - index * MULTIPART_PART_BYTES),
+      }), {
+        expiresIn: MULTIPART_UPLOAD_TTL_SECONDS,
+        signableHeaders: new Set(["content-length"]),
+      });
+      return { partNumber, url };
+    }));
+    return { mode: "multipart", id: row.id, partSize: MULTIPART_PART_BYTES, parts };
+  }
   const headers = {
     "Content-Type": row.mimeType,
     "If-None-Match": "*",
@@ -113,7 +168,7 @@ export async function signUpload(row: DriveRow) {
     signableHeaders: new Set(["content-type", "content-length", "if-none-match", "x-amz-meta-upload-id"]),
     unhoistableHeaders: new Set(["x-amz-meta-upload-id"]),
   });
-  return { id: row.id, url, headers };
+  return { mode: "single", id: row.id, url, headers };
 }
 
 export async function verifyUpload(row: DriveRow, finalized = false): Promise<string> {
@@ -139,7 +194,47 @@ export async function verifyUpload(row: DriveRow, finalized = false): Promise<st
   return head.ETag;
 }
 
+async function commitMultipartUpload(row: DriveRow, uploadId: string): Promise<string> {
+  const { client, bucket } = storage();
+  const key = objectKey(row);
+  try {
+    // The 5 GiB limit allows at most 320 parts; a truncated list cannot be valid.
+    const upload = await client.send(new ListPartsCommand({
+      Bucket: bucket,
+      Key: key,
+      UploadId: uploadId,
+      MaxParts: 1000,
+    }));
+    const partCount = Math.ceil(row.size / MULTIPART_PART_BYTES);
+    if (upload.IsTruncated || upload.Parts?.length !== partCount) {
+      throw new DriveError("The upload is missing parts or does not match the upload details. Finish uploading or cancel it and try again.");
+    }
+    const parts = upload.Parts.map((part, index) => {
+      if (
+        part.PartNumber !== index + 1 || !part.ETag ||
+        part.Size !== Math.min(MULTIPART_PART_BYTES, row.size - index * MULTIPART_PART_BYTES)
+      ) {
+        throw new DriveError("The uploaded file does not match the upload details. Cancel it and upload the file again.");
+      }
+      return { PartNumber: part.PartNumber, ETag: part.ETag };
+    });
+    await client.send(new CompleteMultipartUploadCommand({
+      Bucket: bucket,
+      Key: key,
+      UploadId: uploadId,
+      MultipartUpload: { Parts: parts },
+    }));
+  } catch (error) {
+    // R2 completion may have succeeded before a response or database commit failed.
+    // Only an exact final-object match can recover an upload that no longer exists.
+    if (!(error instanceof Error && error.name === "NoSuchUpload")) throw error;
+  }
+  return verifyUpload(row, true);
+}
+
 export async function commitUpload(row: DriveRow): Promise<string> {
+  // Persisted mode preserves older large uploads that still use the single PUT path.
+  if (row.multipartUploadId) return commitMultipartUpload(row, row.multipartUploadId);
   const { client, bucket } = storage();
   const stagedEtag = await verifyUpload(row);
   await client.send(new CopyObjectCommand({
@@ -153,13 +248,15 @@ export async function commitUpload(row: DriveRow): Promise<string> {
 }
 
 export async function removeStagedObject(row: DriveRow) {
+  if (row.multipartUploadId) return;
   const { client, bucket } = storage();
   await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagedObjectKey(row) }));
 }
 
 export async function removeObject(row: DriveRow) {
+  await abortMultipartUpload(row);
   const { client, bucket } = storage();
-  // A pending row may already have a final copy if a prior completion transaction failed.
+  // A pending row may already have a final object if a completion transaction failed.
   await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: objectKey(row) }));
   await removeStagedObject(row);
 }

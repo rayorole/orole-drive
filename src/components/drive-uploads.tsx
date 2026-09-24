@@ -2,13 +2,16 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, ChevronDown, ChevronUp, CircleAlert, Upload, X } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, CircleAlert, X } from "lucide-react";
 import { beginUpload, cancelUpload, completeUpload } from "@/app/actions/drive";
 import { MAX_UPLOAD_BYTES } from "@/lib/drive-types";
+import { transferUpload } from "@/lib/upload-transfer";
+import { UploadRate } from "@/lib/upload-rate";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/cubby-ui/progress";
 import { Spinner } from "@/components/spinner";
 import { formatBytes } from "@/components/drive-item";
+import { DriveFileIcon } from "@/components/drive-file-icon";
 
 type UploadStatus = "queued" | "preparing" | "uploading" | "saving" | "complete" | "cancelled" | "error";
 type UploadJob = {
@@ -17,9 +20,12 @@ type UploadJob = {
   parentId: string | null;
   status: UploadStatus;
   progress: number;
+  uploadedBytes: number;
+  bytesPerSecond: number | null;
+  rate?: UploadRate;
   error?: string;
   uploadId?: string;
-  xhr?: XMLHttpRequest;
+  controller?: AbortController;
   cancelled: boolean;
 };
 
@@ -42,32 +48,27 @@ export function useDriveUploads(): DriveUploads {
   }, []);
 
   const run = useCallback(async (job: UploadJob) => {
+    const controller = new AbortController();
+    job.controller = controller;
     job.status = "preparing";
+    const stopProgress = () => {
+      job.rate = undefined;
+      job.bytesPerSecond = null;
+    };
     publish();
     try {
       const ticket = await beginUpload({ name: job.file.name, size: job.file.size, mimeType: job.file.type || "application/octet-stream", parentId: job.parentId });
       if (!ticket.success) throw new Error(ticket.error);
       job.uploadId = ticket.data.id;
-      if (job.cancelled) throw new Error("Upload cancelled.");
+      controller.signal.throwIfAborted();
       job.status = "uploading";
+      job.rate = new UploadRate();
       publish();
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        job.xhr = xhr;
-        xhr.open("PUT", ticket.data.url);
-        for (const [header, value] of Object.entries(ticket.data.headers)) xhr.setRequestHeader(header, value);
-        xhr.upload.onprogress = (event) => {
-          if (!event.lengthComputable || job.cancelled) return;
-          job.progress = Math.round((event.loaded / event.total) * 100);
-          publish();
-        };
-        xhr.onload = () => xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`Storage rejected the upload (${xhr.status}). Try again.`));
-        xhr.onerror = () => reject(new Error("Upload interrupted. Check your connection and try again."));
-        xhr.onabort = () => reject(new Error("Upload cancelled."));
-        xhr.send(job.file);
+      await transferUpload(job.file, ticket.data, controller.signal, (bytes) => {
+        job.uploadedBytes = bytes;
       });
-      if (job.cancelled) throw new Error("Upload cancelled.");
-      job.xhr = undefined;
+      controller.signal.throwIfAborted();
+      stopProgress();
       job.status = "saving";
       job.progress = 100;
       publish();
@@ -76,8 +77,11 @@ export function useDriveUploads(): DriveUploads {
       job.status = "complete";
       void queryClient.invalidateQueries({ queryKey: ["drive"] });
     } catch (error) {
+      controller.abort();
+      stopProgress();
       job.status = job.cancelled ? "cancelled" : "error";
-      job.error = error instanceof Error ? error.message : "Could not upload this file. Try again.";
+      job.error = job.cancelled ? "Upload cancelled." : error instanceof Error ? error.message : "Could not upload this file. Try again.";
+      publish();
       if (job.uploadId) {
         try {
           const result = await cancelUpload(job.uploadId);
@@ -87,7 +91,8 @@ export function useDriveUploads(): DriveUploads {
         }
       }
     } finally {
-      job.xhr = undefined;
+      stopProgress();
+      job.controller = undefined;
       running.current -= 1;
       publish();
     }
@@ -102,6 +107,20 @@ export function useDriveUploads(): DriveUploads {
     }
   }, [jobs, run]);
 
+  const uploading = jobs.some((job) => job.status === "uploading");
+  useEffect(() => {
+    if (!uploading) return;
+    const timer = window.setInterval(() => {
+      for (const job of jobsRef.current) {
+        if (job.status !== "uploading" || !job.rate) continue;
+        job.progress = job.file.size ? Math.floor(job.uploadedBytes / job.file.size * 100) : 0;
+        job.bytesPerSecond = job.rate.sample(job.uploadedBytes);
+      }
+      publish();
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [uploading, publish]);
+
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -109,7 +128,10 @@ export function useDriveUploads(): DriveUploads {
       for (const job of jobsRef.current) {
         if (job.status === "queued" || job.status === "preparing" || job.status === "uploading") {
           job.cancelled = true;
-          job.xhr?.abort();
+          job.status = "cancelled";
+          job.bytesPerSecond = null;
+          job.rate = undefined;
+          job.controller?.abort();
         }
       }
     };
@@ -125,7 +147,7 @@ export function useDriveUploads(): DriveUploads {
 
   const addFiles = useCallback((files: File[], parentId: string | null) => {
     jobsRef.current.push(...files.map((file): UploadJob => ({
-      key: crypto.randomUUID(), file, parentId, cancelled: false, progress: 0,
+      key: crypto.randomUUID(), file, parentId, cancelled: false, progress: 0, uploadedBytes: 0, bytesPerSecond: null,
       status: file.size > MAX_UPLOAD_BYTES ? "error" : "queued",
       error: file.size > MAX_UPLOAD_BYTES ? `This file exceeds the ${formatBytes(MAX_UPLOAD_BYTES)} upload limit.` : undefined,
     })));
@@ -137,7 +159,9 @@ export function useDriveUploads(): DriveUploads {
     if (!job || !["queued", "preparing", "uploading"].includes(job.status)) return;
     job.cancelled = true;
     job.status = "cancelled";
-    job.xhr?.abort();
+    job.bytesPerSecond = null;
+    job.rate = undefined;
+    job.controller?.abort();
     publish();
   }, [publish]);
 
@@ -166,12 +190,15 @@ export function DriveUploadQueue({ uploads }: { uploads: DriveUploads }) {
       </div>
       {!collapsed && <div id="upload-jobs" className="max-h-72 overflow-y-auto border-t">
         {jobs.map((job) => <div key={job.key} className="flex items-start gap-3 border-b px-4 py-3 last:border-0">
-          <Upload className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+          <DriveFileIcon item={{ name: job.file.name, kind: "file", mimeType: job.file.type }} />
           <div className="flex min-w-0 flex-1 flex-col gap-1.5">
             <p className="truncate text-sm" title={job.file.name}>{job.file.name}</p>
             {(job.status === "uploading" || job.status === "saving") && <Progress size="sm" value={job.progress} aria-label={`Uploading ${job.file.name}`} />}
-            <p className={job.status === "error" ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>
-              {job.status === "queued" ? "Waiting to upload" : job.status === "preparing" ? "Preparing upload…" : job.status === "uploading" ? `${job.progress}% of ${formatBytes(job.file.size)}` : job.status === "saving" ? "Finishing…" : job.status === "complete" ? "Uploaded" : job.status === "cancelled" ? "Cancelled" : job.error}
+            <p className={job.status === "error" ? "break-words text-xs tabular-nums text-destructive" : "break-words text-xs tabular-nums text-muted-foreground"}>
+              {job.status === "queued" ? "Waiting to upload" : job.status === "preparing" ? "Preparing upload…" : job.status === "uploading" ? <>
+                <span>{job.progress}% of {formatBytes(job.file.size)}</span>{" "}
+                <span className="inline-block">· {job.bytesPerSecond === null ? "Measuring speed…" : `${formatBytes(Math.round(job.bytesPerSecond))}/s`}</span>
+              </> : job.status === "saving" ? "Finishing…" : job.status === "complete" ? "Uploaded" : job.status === "cancelled" ? "Cancelled" : job.error}
             </p>
           </div>
           {["queued", "preparing", "uploading"].includes(job.status) && <Button variant="ghost" size="icon-sm" aria-label={`Cancel upload of ${job.file.name}`} onClick={() => cancel(job.key)}><X /></Button>}

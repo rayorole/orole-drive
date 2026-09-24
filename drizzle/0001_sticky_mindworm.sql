@@ -1,0 +1,1 @@
+ALTER TABLE "drive_items" ADD COLUMN "multipart_upload_id" text;
