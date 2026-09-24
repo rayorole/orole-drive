@@ -14,8 +14,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Spinner } from "@/components/spinner";
-import { fileType, formatBytes } from "@/components/drive-item";
-import { DriveFileIcon } from "@/components/drive-file-icon";
+import { DriveFileIcon, fileType, formatBytes } from "@/components/drive-item";
 import { PdfPreview } from "@/components/pdf-preview";
 
 export function useDriveDownload() {
@@ -138,7 +137,7 @@ export function DriveShareDialog({ item, onClose }: { item: DriveItem; onClose: 
       {url ? <FieldGroup><Field>
         <FieldLabel htmlFor="public-file-link">Public link</FieldLabel>
         <div className="flex gap-2"><Input id="public-file-link" value={url} readOnly onFocus={(event) => event.target.select()} /><Button variant="outline" size="icon" onClick={copyLink} aria-label="Copy public link"><Copy /></Button></div>
-      </Field></FieldGroup> : <p className="text-sm leading-relaxed text-muted-foreground">Create a public link to share this file outside your family. You can revoke access here at any time.</p>}
+      </Field></FieldGroup> : <p className="text-sm leading-relaxed text-muted-foreground">Create a public link to share this file outside your family. Your verified email will appear on the public page. You can revoke access here at any time.</p>}
       {url && <p className="text-xs leading-relaxed text-muted-foreground">Revoking blocks new visits immediately. Downloads already opened may remain available for up to one minute. Copies already downloaded cannot be recalled.</p>}
       {mutation.error && <p role="alert" className="text-sm text-destructive">{mutation.error.message}</p>}
       <DialogFooter>

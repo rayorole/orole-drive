@@ -318,6 +318,7 @@ export async function getPublicFile(token: string): Promise<{
   item: DriveItem;
   downloadUrl: string;
   previewUrl: string | null;
+  sharedByEmail: string | null;
 } | null> {
   if (!PUBLIC_TOKEN_PATTERN.test(token)) return null;
   return getDb().transaction(async (tx) => {
@@ -331,6 +332,6 @@ export async function getPublicFile(token: string): Promise<{
     const [downloadUrl, previewUrl] = await Promise.all([signDownload(row), signDownload(row, true)]);
     if (!downloadUrl) return null;
     // Never expose the family's folder structure through an unauthenticated share page.
-    return { item: { ...toDriveItem(row), parentId: null }, downloadUrl, previewUrl };
+    return { item: { ...toDriveItem(row), parentId: null }, downloadUrl, previewUrl, sharedByEmail: row.sharedByEmail };
   });
 }

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, ChevronDown, ChevronUp, CircleAlert, X } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, CircleAlert, Upload, X } from "lucide-react";
 import { beginUpload, cancelUpload, completeUpload } from "@/app/actions/drive";
 import { MAX_UPLOAD_BYTES } from "@/lib/drive-types";
 import { transferUpload } from "@/lib/upload-transfer";
@@ -11,7 +11,6 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/cubby-ui/progress";
 import { Spinner } from "@/components/spinner";
 import { formatBytes } from "@/components/drive-item";
-import { DriveFileIcon } from "@/components/drive-file-icon";
 
 type UploadStatus = "queued" | "preparing" | "uploading" | "saving" | "complete" | "cancelled" | "error";
 type UploadJob = {
@@ -179,7 +178,7 @@ export function DriveUploadQueue({ uploads }: { uploads: DriveUploads }) {
   if (!jobs.length) return null;
   const errors = jobs.filter((job) => job.status === "error").length;
   return (
-    <section aria-label="File uploads" className="fixed bottom-4 right-4 z-30 w-[calc(100%-2rem)] overflow-hidden rounded-2xl border bg-popover text-popover-foreground shadow-lg sm:w-96">
+    <section aria-label="File uploads" className="notification-surface fixed bottom-4 right-4 z-30 w-[calc(100%-2rem)] overflow-hidden sm:w-96">
       <div className="flex items-center gap-2 px-4 py-3">
         {pending ? <Spinner /> : errors ? <CircleAlert className="size-4 text-destructive" /> : <Check className="size-4 text-primary" />}
         <p className="min-w-0 flex-1 text-sm font-medium" aria-live="polite">
@@ -190,7 +189,7 @@ export function DriveUploadQueue({ uploads }: { uploads: DriveUploads }) {
       </div>
       {!collapsed && <div id="upload-jobs" className="max-h-72 overflow-y-auto border-t">
         {jobs.map((job) => <div key={job.key} className="flex items-start gap-3 border-b px-4 py-3 last:border-0">
-          <DriveFileIcon item={{ name: job.file.name, kind: "file", mimeType: job.file.type }} />
+          <Upload className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
           <div className="flex min-w-0 flex-1 flex-col gap-1.5">
             <p className="truncate text-sm" title={job.file.name}>{job.file.name}</p>
             {(job.status === "uploading" || job.status === "saving") && <Progress size="sm" value={job.progress} aria-label={`Uploading ${job.file.name}`} />}

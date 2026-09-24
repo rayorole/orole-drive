@@ -109,6 +109,10 @@
   ::selection { background: var(--accent); color: var(--foreground); }
 }
 
+@utility notification-surface {
+  @apply rounded-2xl border bg-popover text-popover-foreground shadow-lg;
+}
+
 [data-slot="button"] { transition: scale 320ms var(--press-spring), background-color 160ms var(--surface-ease), color 160ms var(--surface-ease), box-shadow 160ms var(--surface-ease), opacity 160ms var(--surface-ease); }
 [data-slot="button"]:active:not(:disabled) { scale: .975; transition-duration: 80ms, 160ms, 160ms, 160ms, 160ms; }
 [data-slot="dialog-content"], [data-slot="alert-dialog-content"] {

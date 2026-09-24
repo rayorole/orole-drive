@@ -26,6 +26,7 @@ export default async function SharePage({ params }: { params: Promise<{ token: s
         <p className="text-sm text-muted-foreground">{size}</p>
       </div>
       <PublicFile item={file.item} token={token} previewUrl={file.previewUrl} />
+      {file.sharedByEmail && <p className="max-w-full text-center text-xs text-muted-foreground">Shared by <span className="wrap-anywhere font-medium text-foreground">{file.sharedByEmail}</span></p>}
     </section>
   </main>;
 }

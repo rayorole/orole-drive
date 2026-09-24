@@ -1,10 +1,11 @@
 "use client";
 
 import {
-  Download, Link2, MoreHorizontal, Pencil, Trash2,
+  Archive, Code2, Download, File, FileImage, FileMusic, FileText,
+  FileVideo, Folder, Link2, MoreHorizontal, Pencil, Trash2,
 } from "lucide-react";
 import type { DriveItem } from "@/lib/drive-types";
-import { DriveFileIcon } from "@/components/drive-file-icon";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem,
@@ -22,6 +23,29 @@ export function fileType(item: Pick<DriveItem, "name" | "kind" | "mimeType">) {
   if (item.kind === "folder") return "Folder";
   const extension = item.name.split(".").pop();
   return extension && extension !== item.name ? `${extension.toUpperCase()} file` : "File";
+}
+
+export function DriveFileIcon({ item, large = false }: {
+  item: Pick<DriveItem, "name" | "kind" | "mimeType">;
+  large?: boolean;
+}) {
+  const mime = item.mimeType ?? "";
+  const Icon = item.kind === "folder" ? Folder
+    : mime.startsWith("image/") ? FileImage
+    : mime.startsWith("video/") ? FileVideo
+    : mime.startsWith("audio/") ? FileMusic
+    : /zip|compressed|archive|tar/.test(mime) ? Archive
+    : /json|javascript|xml|html/.test(mime) ? Code2
+    : mime.startsWith("text/") || mime === "application/pdf" ? FileText : File;
+  return (
+    <span aria-hidden="true" className={cn(
+      "inline-flex shrink-0 items-center justify-center",
+      large ? "size-20" : "size-8 rounded-lg bg-muted/65",
+      item.kind === "folder" || mime.startsWith("image/") ? "text-primary" : "text-muted-foreground",
+    )}>
+      <Icon className={cn(large ? "size-[4.5rem]" : "size-5", item.kind === "folder" && "fill-primary/20")} strokeWidth={large ? 1.2 : 1.6} />
+    </span>
+  );
 }
 
 export type DriveItemAction = "rename" | "delete" | "share" | "download";

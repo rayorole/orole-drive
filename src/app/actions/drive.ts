@@ -43,10 +43,10 @@ const mimeSchema = z.string().trim().toLowerCase().max(127).regex(
   "Choose a file with a valid content type.",
 );
 
-async function familyAction<T>(work: () => Promise<T>): Promise<ActionResult<T>> {
+async function familyAction<T>(work: (email: string) => Promise<T>): Promise<ActionResult<T>> {
   try {
-    await requireFamily();
-    return { success: true, data: await work() };
+    const session = await requireFamily();
+    return { success: true, data: await work(session.user.email) };
   } catch (error) {
     if (error instanceof DriveError || error instanceof FamilyAuthError) {
       return { success: false, error: error.message };
@@ -247,7 +247,7 @@ export async function renameItem(input: { id: string; name: string }): Promise<A
 }
 
 export async function setPublic(input: { id: string; enabled: boolean }): Promise<ActionResult<{ url: string | null }>> {
-  return familyAction(async () => {
+  return familyAction(async (email) => {
     const { id, enabled } = z.object({ id: idSchema, enabled: z.boolean() }).parse(input);
     return getDb().transaction(async (tx) => {
       const [row] = await tx.select().from(driveItems).where(and(
@@ -257,7 +257,8 @@ export async function setPublic(input: { id: string; enabled: boolean }): Promis
       if (row.kind !== "file") throw new DriveError("Only files can have public links. Share the files inside this folder instead.");
       const publicToken = enabled ? row.publicToken ?? createPublicToken() : null;
       const url = publicToken ? publicShareUrl(publicToken) : null;
-      await tx.update(driveItems).set({ publicToken, updatedAt: new Date() }).where(eq(driveItems.id, id));
+      const sharedByEmail = enabled ? (row.publicToken ? row.sharedByEmail : email) : null;
+      await tx.update(driveItems).set({ publicToken, sharedByEmail, updatedAt: new Date() }).where(eq(driveItems.id, id));
       return { url };
     });
   });

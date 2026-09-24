@@ -15,7 +15,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
       <MotionConfig reducedMotion="user">
         <QueryClientProvider client={queryClient}>
-          <TooltipProvider delay={350}>{children}<Toaster richColors closeButton /></TooltipProvider>
+          <TooltipProvider delay={350}>{children}<Toaster closeButton /></TooltipProvider>
         </QueryClientProvider>
       </MotionConfig>
     </ThemeProvider>

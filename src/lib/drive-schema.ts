@@ -27,6 +27,7 @@ export const driveItems = pgTable(
     etag: text("etag"),
     state: text("state", { enum: ["pending", "complete"] }).notNull(),
     publicToken: varchar("public_token", { length: 43 }).unique(),
+    sharedByEmail: varchar("shared_by_email", { length: 254 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

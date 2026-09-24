@@ -15,6 +15,13 @@
       "when": 1790284891641,
       "tag": "0001_sticky_mindworm",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790287041746,
+      "tag": "0002_brave_robbie_robertson",
+      "breakpoints": true
     }
   ]
 }

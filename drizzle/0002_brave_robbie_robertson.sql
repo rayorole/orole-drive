@@ -1,0 +1,1 @@
+ALTER TABLE "drive_items" ADD COLUMN "shared_by_email" varchar(254);
