@@ -1,0 +1,5 @@
+.env*
+.agents/
+.claude/
+skills-lock.json
+public/pdf-assets/
