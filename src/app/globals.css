@@ -1,26 +1,146 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+@custom-variant dark (&:is(.dark *));
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: "Inter Variable", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+  --font-heading: var(--font-sans);
+  --text-sm: .8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-xs: .75rem;
+  --text-xs--line-height: 1rem;
+  --color-sidebar-ring: var(--ring);
+  --color-sidebar-border: var(--border);
+  --color-sidebar-accent-foreground: var(--foreground);
+  --color-sidebar-accent: var(--accent);
+  --color-sidebar-primary-foreground: var(--primary-foreground);
+  --color-sidebar-primary: var(--primary);
+  --color-sidebar-foreground: var(--foreground);
+  --color-sidebar: var(--sidebar);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-accent-foreground: var(--foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * .6);
+  --radius-md: calc(var(--radius) * .8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+:root {
+  color-scheme: light;
+  --background: #ffffff;
+  --foreground: #252731;
+  --card: #ffffff;
+  --popover: #ffffff;
+  --primary: #0066cc;
+  --primary-foreground: #ffffff;
+  --secondary: #f2f3f4;
+  --muted: #f7f8f8;
+  --muted-foreground: #5b5d64;
+  --accent: #f2f3f4;
+  --destructive: #c52d27;
+  --success: #24813c;
+  --border: #dee3e8;
+  --input: #c4cad1;
+  --ring: #0066cc;
+  --radius: .625rem;
+  --sidebar: #ffffff;
+  --surface-shadow: 0 2px 10px rgb(0 0 0 / .06);
+  /* transitions.dev surface behavior, tuned to the user's Outglow reference. */
+  --modal-open-dur: 200ms;
+  --modal-close-dur: 160ms;
+  --modal-scale: .96;
+  --dropdown-open-dur: 95ms;
+  --dropdown-close-dur: 65ms;
+  --dropdown-pre-scale: .97;
+  --surface-ease: cubic-bezier(.23, 1, .32, 1);
+  --press-spring: linear(0, .11 6%, .35 11%, .64 17%, .90 22%, 1.08 28%, 1.19 33%, 1.22 39%, 1.17 47%, 1.08 56%, 1 64%, .96 72%, .95 78%, .97 89%, 1);
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+.dark {
+  color-scheme: dark;
+  --background: #191a1c;
+  --foreground: #ffffff;
+  --card: #1f2126;
+  --popover: #1f2126;
+  --primary: #89bdfc;
+  --primary-foreground: #102641;
+  --secondary: #303338;
+  --muted: #1f2126;
+  --muted-foreground: #b4b6bf;
+  --accent: #2c2e33;
+  --destructive: #ff8982;
+  --success: #79d494;
+  --border: #36383e;
+  --input: #595d68;
+  --ring: #89bdfc;
+  --sidebar: #191a1c;
+  --surface-shadow: 0 4px 12px rgb(0 0 0 / .4);
+}
+
+@layer base {
+  * { @apply border-border; }
+  html { @apply font-sans; font-optical-sizing: auto; }
+  body { @apply bg-background text-foreground; margin: 0; font-size: .8125rem; line-height: 1.4; }
+  button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+  ::selection { background: var(--accent); color: var(--foreground); }
+}
+
+[data-slot="button"] { transition: scale 320ms var(--press-spring), background-color 160ms var(--surface-ease), color 160ms var(--surface-ease), box-shadow 160ms var(--surface-ease), opacity 160ms var(--surface-ease); }
+[data-slot="button"]:active:not(:disabled) { scale: .975; transition-duration: 80ms, 160ms, 160ms, 160ms, 160ms; }
+[data-slot="dialog-content"], [data-slot="alert-dialog-content"] {
+  box-shadow: var(--surface-shadow);
+  animation: none;
+  transition: opacity var(--modal-open-dur) var(--surface-ease), scale var(--modal-open-dur) var(--surface-ease);
+}
+[data-slot="dialog-content"][data-starting-style], [data-slot="alert-dialog-content"][data-starting-style] { opacity: 0; scale: var(--modal-scale); }
+[data-slot="dialog-content"][data-ending-style], [data-slot="alert-dialog-content"][data-ending-style] { opacity: 0; scale: var(--modal-scale); transition-duration: var(--modal-close-dur); }
+[data-slot="dropdown-menu-content"] {
+  box-shadow: var(--surface-shadow);
+  transform-origin: var(--transform-origin);
+  animation: none;
+  transition: opacity var(--dropdown-open-dur) var(--surface-ease), scale var(--dropdown-open-dur) var(--surface-ease);
+}
+[data-slot="dropdown-menu-content"][data-starting-style] { opacity: 0; scale: var(--dropdown-pre-scale); }
+[data-slot="dropdown-menu-content"][data-ending-style] { opacity: 0; scale: .99; transition-duration: var(--dropdown-close-dur); }
+
+@media (pointer: coarse) {
+  [data-slot="button"], [data-slot="toggle-group-item"] { min-height: 2.75rem; min-width: 2.75rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+  [data-slot="button"]:active:not(:disabled) { scale: 1; }
+  [data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="dropdown-menu-content"] { scale: 1 !important; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  [class*="backdrop-blur"] { backdrop-filter: none !important; background-color: var(--background); }
+  [data-slot="dialog-overlay"], [data-slot="alert-dialog-overlay"] { background: rgb(0 0 0 / .5); }
+}
+@media (prefers-contrast: more) {
+  :root { --muted-foreground: #414146; --border: #73737b; --input: #73737b; }
+  .dark { --muted-foreground: #dedee4; --border: #9a9aa4; --input: #9a9aa4; }
+  [class*="backdrop-blur"] { backdrop-filter: none; background-color: var(--background); }
 }

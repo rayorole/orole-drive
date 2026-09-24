@@ -39,3 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Generated PDF resources and locally installed deployment skills
+/public/pdf-assets/
+/.agents/
+/.claude/
+/skills-lock.json
