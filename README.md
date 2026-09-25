@@ -24,8 +24,12 @@ Install Node.js 24 and provide these environment variables in `.env.local` (neve
 - `R2_BUCKET`: private bucket name (`data-orole` in production).
 - `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`: bucket-scoped object read/write credentials.
 - `VIRUSTOTAL_API_KEY`: optional; enables hash-report lookup and explicitly approved file submissions.
-- `CRON_SECRET`: strong random secret required for Vercel's authenticated daily Trash cleanup.
+- `CRON_SECRET`: strong random secret required for Vercel's authenticated daily Trash cleanup and search indexing.
 - `AI_GATEWAY_API_KEY`: optional; Vercel AI Gateway key used to score file risk with TypeSafe's Jev model. Deployments on Vercel can use OIDC instead.
+- `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_AI_API_TOKEN`: optional; turn on AI search. The token needs **Workers AI: Read** and **Vectorize: Edit**. Without both, search features stay hidden and nothing is sent anywhere.
+- `VECTORIZE_INDEX`: Vectorize index name, default `orole-drive-search`.
+- `OPENROUTER_API_KEY`: optional; image captions for search and **Ask your drive** answers. Set it in Vercel too.
+- `SEARCH_CAPTION_MODEL` and `SEARCH_CHAT_MODEL`: OpenRouter model slugs, default `anthropic/claude-haiku-4.5` and `anthropic/claude-sonnet-5`.
 - `DRIVE_STORAGE_QUOTA_BYTES`: whole-drive storage limit in bytes, default 1 TiB.
 - `DRIVE_MEMBER_QUOTA_BYTES`: storage limit per contributing member in bytes, default 250 GiB.
 
@@ -104,13 +108,29 @@ The scan regression uses synthetic bytes and a stalled destination, never real u
 node --max-old-space-size=128 --conditions=react-server --import tsx --test src/lib/virustotal.test.ts
 ```
 
+## AI search
+
+With Cloudflare configured, file contents become searchable by meaning and by exact words, for members in the app and for MCP agents. Everything is on by default; an owner can choose **Exclude from AI search** in a folder's Actions menu (Security) to keep that folder and everything inside it out. Details shows each file's state: Indexed, Queued, Failed (retried) or Skipped with the reason.
+
+- **What is indexed:** text and code (first 512 KiB), PDFs up to 5 MiB (text layer of the first 20 pages, 64,000 characters, no OCR), `.docx`/`.xlsx`/`.pptx` within the Office preview limits (one passage group per sheet or slide, cached cell values only), and JPEG/PNG/GIF/WebP/AVIF images up to 10 MiB through a short AI caption plus any clearly visible text. Only current contents are indexed, never old versions. Items in Trash, pending uploads and anything inside a password-protected folder are never extracted, embedded or returned, even while the folder is unlocked.
+- **Pipeline:** contents are split into ~1,500-character passages (200 overlap; the first starts with the file name, folder paths are not embedded) and embedded with Workers AI `@cf/baai/bge-m3` (1,024 dimensions, multilingual) into Cloudflare Vectorize. Postgres keeps the passages with a `simple` (unstemmed, Dutch/English-safe) full-text index. Queries fuse both rankings (reciprocal rank fusion); if Cloudflare is unavailable, keyword matches still return and the result says so.
+- **Access:** Cloudflare stores only vectors keyed by passage id, with no names, text or permissions. Every hit is re-authorized in Postgres for the searching member or MCP connection at query time (item ACLs, Trash, exclusion and passwords); anything else is dropped without a trace. Folder paths show only folders the member can read. Search is limited to 20 queries per minute per member and 500 characters.
+- **Freshness:** uploads, new versions, restores, renames, copies and MCP `write_file` queue a file and index it right after the response. Trash, permanent deletion, exclusion, adding a folder password and moving into a protected or excluded folder remove passages from Postgres in the same transaction; their Vectorize vectors are journaled and deleted afterwards, with retries. A contents change during extraction discards the stale text. The daily 04:00 UTC job (`/api/cron/search-index`, schedule in `vercel.json`) retries failures (up to five attempts, with back-off), deletes leftover vectors and backfills files uploaded before search was enabled.
+- **Privacy and cost:** file text is sent to Cloudflare Workers AI for embedding. Image bytes are re-encoded (metadata such as GPS is stripped, at most 1,568 px) and sent through OpenRouter to Anthropic for captions. Embedding costs about $0.012 per million tokens; each image caption is a small Haiku request. Leave the Cloudflare variables unset to keep search off entirely.
+
+One-time setup, then set the environment variables and run migrations:
+
+```sh
+npx wrangler vectorize create orole-drive-search --dimensions=1024 --metric=cosine
+```
+
 ## MCP access
 
 Connect through the sidebar's **Connect an agent** dialog to `https://drive.orole.be/api/mcp`. The endpoint uses the installed SDK's MCP 2026-07-28 stateless HTTP profile; clients must support that version, OAuth authorization code with S256 PKCE, and form elicitation for Trash/sharing. Use a registered client or an HTTPS Client ID Metadata Document; unauthenticated dynamic client registration is not enabled.
 
 Access defaults to `mcp:read`. Separately consent to `mcp:write`, `mcp:share` or `mcp:trash` when needed. Trash/sharing require signed, short-lived confirmations bound to the session, client, operation and item version. Tokens and refreshes require the original live family session; signing out revokes access. Folder passwords and all normal storage permissions still apply.
 
-Tools cover listing/searching, metadata, bounded text/image/PDF reading, download links, folder creation, writing, renaming, moving, Trash, sharing and storage usage. Resources are `drive://root`, `drive://file/<id>` and `drive://folder/<id>`; prompts cover summaries, duplicate discovery and cleanup suggestions. PDF text extraction is limited to 5 MiB, 20 pages and 64,000 characters, without OCR.
+Tools cover listing/searching, metadata, bounded text/image/PDF reading, download links, folder creation, writing, renaming, moving, Trash, sharing and storage usage. `search_files` matches names only; with AI search configured, `semantic_search` searches contents (query, `limit` 1–25, optional `folderId` and `type`) and returns files with matching passages under the same access rules, and the `ask_drive` prompt tells an agent to search, read the best hits and answer with file citations. Resources are `drive://root`, `drive://file/<id>` and `drive://folder/<id>`; prompts cover summaries, duplicate discovery and cleanup suggestions. PDF text extraction is limited to 5 MiB, 20 pages and 64,000 characters, without OCR.
 - MCP `share_file` also accepts folders. `move_item` and `copy_item` accept `onConflict` (Keep both by default); Replace requires trash permission and confirmation. `write_file` supports file replacement with version history. `storage_summary` includes drive/member quotas, category totals, member usage and the largest accessible files.
 
 ## Deployment
@@ -118,6 +138,8 @@ Tools cover listing/searching, metadata, bounded text/image/PDF reading, downloa
 Run `npm run db:migrate` before starting or deploying code that changes the schema. Migration `0008_pinned_folders_emoji.sql` adds pins and folder emoji metadata; `0009_owner_access.sql` adds owner/member permissions, backfills owners from recorded creators, makes existing roots private and nested items inherit, and preserves existing explicit public links. Unknown/deleted owners are never guessed or reassigned; their items fail closed. Apply the matching application code with the migration: older code does not enforce the new ACLs. Running new code without its migrations makes file queries fail.
 
 Migration `0010_storage_work.sql` adds the durable upload/cleanup journal, multipart-initiation intent and isolated single-PUT publication keys. Apply it before deploying this performance release. It is additive for the preceding application, and new code reconciles unfinished uploads created before or during rollout. R2 credentials must permit prefix-scoped multipart listing/abort as well as object reads/writes.
+
+Migration `0011_search_index.sql` adds `drive_items.search_excluded` and the search tables (`drive_search_docs`, `drive_search_chunks` with a generated `tsvector`, `drive_search_orphans`). It is additive. After deploying with Cloudflare configured, existing files are backfilled by the daily job in batches.
 
 The private GitHub repository is https://github.com/rayorole/orole-drive, connected to the Vercel project `orole-drive`. Production uses the `drive.orole.be` custom domain, the Neon integration and the private R2 bucket. Vercel functions run in Frankfurt (`fra1`), alongside Neon's `eu-central-1` database; `vercel.json` pins the region. Set production environment variables through Vercel, not source files. For a new environment, apply migrations before deploying. The build does not run migrations implicitly.
 

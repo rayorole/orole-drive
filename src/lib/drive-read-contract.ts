@@ -3,7 +3,7 @@ import type { FileScanStatus } from "@/app/actions/virustotal";
 import type {
   ActionResult, DriveActivityAction, DriveActivityMember, DriveActivityPage,
   DriveArchiveManifest, DriveFileVersion, DriveItem, DriveListInput, DriveListing,
-  ItemSharing, ResumableUpload, SearchIndexStatus, ShareMember, StorageUsageReport, TrashSummary,
+  ItemSharing, ResumableUpload, SearchIndexStatus, SemanticSearchInput, SemanticSearchResult, ShareMember, StorageUsageReport, TrashSummary,
 } from "@/lib/drive-types";
 
 export type ActivityReadInput = {
@@ -37,6 +37,7 @@ export interface DriveReadContract {
   getPublicFolderFileAccess: { args: [token: string, id: string]; data: PublicFileUrls };
   getPublicFolderArchive: { args: [token: string, id: string]; data: DriveArchiveManifest };
   getSearchStatus: { args: [id: string]; data: SearchIndexStatus | null };
+  searchContents: { args: [input: SemanticSearchInput]; data: SemanticSearchResult };
 }
 
 export type DriveReadOperation = keyof DriveReadContract;

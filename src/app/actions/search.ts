@@ -7,10 +7,16 @@ import { assertItemAccess, driveAction, withDriveTransaction } from "@/lib/drive
 import { idSchema } from "@/lib/drive-input";
 import { DriveError } from "@/lib/drive-errors";
 import { driveItems } from "@/lib/drive-schema";
-import type { ActionResult, SearchIndexStatus } from "@/lib/drive-types";
+import type { ActionResult, SearchIndexStatus, SemanticSearchInput, SemanticSearchResult } from "@/lib/drive-types";
 import { isSearchConfigured } from "@/lib/search-config";
 import { enqueueSearchTree, removeFromSearch } from "@/lib/search-index";
+import { semanticSearch } from "@/lib/search-query";
 import { driveSearchDocs } from "@/lib/search-schema";
+
+/** Files whose contents match a query, re-authorized for this member; see semanticSearch. */
+export async function searchContents(input: SemanticSearchInput): Promise<ActionResult<SemanticSearchResult>> {
+  return driveAction((ctx) => semanticSearch(ctx, input), "read");
+}
 
 /** Owner-only: a folder and everything inside it leave AI search (or come back) immediately. */
 export async function setSearchExcluded(input: { id: string; excluded: boolean }): Promise<ActionResult<void>> {

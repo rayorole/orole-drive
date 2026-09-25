@@ -54,6 +54,11 @@ export type SearchIndexStatus = {
   state: "queued" | "indexing" | "indexed" | "skipped" | "failed" | "not_indexed";
   skipReason: "too_large" | "unsupported" | "excluded" | "protected" | "empty" | "trashed" | null;
 };
+export type SemanticSearchInput = { query: string; limit?: number; folderId?: string | null; type?: DriveTypeFilter };
+/** One file found by its contents. `folderId` is where it is listed for this session (null = top level). `path` names only readable ancestors. */
+export type SemanticSearchHit = { item: DriveItem; folderId: string | null; path: string[]; score: number; passages: { text: string; location: string | null }[] };
+/** `degraded`: meaning-based search was unavailable, so only exact keyword matches are shown. */
+export type SemanticSearchResult = { results: SemanticSearchHit[]; degraded: boolean };
 export type DriveScanStatus = "scanning" | "clean" | "suspicious" | "malicious";
 export const FOLDER_COLORS = ["blue", "green", "amber", "red", "violet", "gray"] as const;
 export type DriveFolderColor = (typeof FOLDER_COLORS)[number];

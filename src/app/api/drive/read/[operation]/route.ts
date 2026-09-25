@@ -12,7 +12,7 @@ import { listResumableUploads } from "@/app/actions/uploads";
 import { listVersions, getVersionDownloadUrl } from "@/app/actions/versions";
 import { getFileScanStatus, getPublicFileScanStatus } from "@/app/actions/virustotal";
 import { getPublicAccess, getPublicFolderFileAccess, getPublicFolderArchive } from "@/app/actions/public";
-import { getSearchStatus } from "@/app/actions/search";
+import { getSearchStatus, searchContents } from "@/app/actions/search";
 import type { DriveReadActions, DriveReadOperation } from "@/lib/drive-read-contract";
 
 const reads: DriveReadActions = {
@@ -20,7 +20,7 @@ const reads: DriveReadActions = {
   listActivity, listActivityMembers, getItemSharing, listShareMembers, getConnectedAgents,
   listPinnedFolders, getStorageUsage, getThumbnailUrls, listResumableUploads,
   listVersions, getVersionDownloadUrl, getFileScanStatus, getPublicFileScanStatus,
-  getPublicAccess, getPublicFolderFileAccess, getPublicFolderArchive, getSearchStatus,
+  getPublicAccess, getPublicFolderFileAccess, getPublicFolderArchive, getSearchStatus, searchContents,
 };
 const requestSchema = z.object({ args: z.array(z.unknown()).max(2) }).strict();
 

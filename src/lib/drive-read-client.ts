@@ -1,4 +1,4 @@
-import type { ActionResult, DriveListInput } from "@/lib/drive-types";
+import type { ActionResult, DriveListInput, SemanticSearchInput } from "@/lib/drive-types";
 import type { ActivityReadInput, DriveReadArgs, DriveReadOperation, DriveReadResult } from "@/lib/drive-read-contract";
 
 let accessGeneration = 0;
@@ -65,6 +65,7 @@ export const getPublicAccess = (token: string, signal?: AbortSignal) => readDriv
 export const getPublicFolderFileAccess = (token: string, id: string, signal?: AbortSignal) => readDrive("getPublicFolderFileAccess", [token, id], signal);
 export const getPublicFolderArchive = (token: string, id: string, signal?: AbortSignal) => readDrive("getPublicFolderArchive", [token, id], signal);
 export const getSearchStatus = (id: string, signal?: AbortSignal) => readDrive("getSearchStatus", [id], signal);
+export const searchContents = (input: SemanticSearchInput, signal?: AbortSignal) => readDrive("searchContents", [input], signal);
 
 type ThumbnailRequest = {
   id: string;

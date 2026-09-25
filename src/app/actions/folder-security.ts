@@ -1,9 +1,8 @@
 "use server";
 
 import { randomUUID } from "node:crypto";
-import { and, eq, lt, lte, or, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
-import { authThrottle } from "@/lib/auth-schema";
 import { assertItemAccess, assertItemsAccess, driveAction, withDriveTransaction } from "@/lib/drive-access";
 import type { DriveContext, DriveTransaction } from "@/lib/drive-access";
 import { DriveError } from "@/lib/drive-errors";
@@ -14,6 +13,7 @@ import { hashFolderPassword, isValidFolderPassword, verifyFolderPassword } from 
 import { recordEvents } from "@/lib/activity";
 import { loadTree } from "@/lib/drive-tree";
 import { enqueueSearchTree, removeFromSearch } from "@/lib/search-index";
+import { consumeThrottle } from "@/lib/throttle";
 
 const idSchema = z.uuid("Choose a valid folder.");
 const passwordSchema = z.string().max(1_024, "Use a password up to 1,024 bytes long.").refine(
@@ -36,17 +36,7 @@ async function consumePasswordAttempt(tx: DriveTransaction, ctx: DriveContext, f
     { key: `folder-password:user:${ctx.userId}:${folderId}`, max: 5 },
   ];
   for (const limit of limits) {
-    const expired = lte(authThrottle.windowStartedAt, sql`clock_timestamp() - interval '15 minutes'`);
-    const [claimed] = await tx.insert(authThrottle).values({ key: limit.key, count: 1 })
-      .onConflictDoUpdate({
-        target: authThrottle.key,
-        set: {
-          count: sql`case when ${expired} then 1 else ${authThrottle.count} + 1 end`,
-          windowStartedAt: sql`case when ${expired} then clock_timestamp() else ${authThrottle.windowStartedAt} end`,
-        },
-        setWhere: or(expired, lt(authThrottle.count, limit.max)),
-      }).returning({ key: authThrottle.key });
-    if (!claimed) throw new DriveError("Too many folder password attempts. Wait 15 minutes and try again.");
+    if (!await consumeThrottle(tx, limit.key, limit.max, 15 * 60)) throw new DriveError("Too many folder password attempts. Wait 15 minutes and try again.");
   }
 }
 
