@@ -24,7 +24,7 @@ import { DriveError } from "@/lib/drive-errors";
 import { driveItems } from "@/lib/drive-schema";
 import type { ActionResult, ConflictResolution, ConflictResolutions, DriveItem, UploadResolution } from "@/lib/drive-types";
 import { getPreviewKind, readTextPreview } from "@/lib/file-preview";
-import { downloadMcpBytes, extractMcpPdf, MCP_PDF_MAX_BYTES } from "@/lib/mcp-file-content";
+import { downloadBoundedBytes, extractPdfText, PDF_TEXT_MAX_BYTES, pdfPlainText } from "@/lib/pdf-text";
 import { toDriveItem } from "@/lib/storage";
 import { getStorageUsage } from "@/app/actions/storage-usage";
 
@@ -77,19 +77,19 @@ async function readFileTool(actor: DriveActor, id: string): Promise<CallToolResu
     return { content: [{ type: "text", text: `${text}${note}` }], structuredContent: { encoding, truncated } };
   }
   if (previewKind === "pdf") {
-    if (item.size <= 0 || item.size > MCP_PDF_MAX_BYTES) {
+    if (item.size <= 0 || item.size > PDF_TEXT_MAX_BYTES) {
       return { content: [{ type: "text", text: "PDF text extraction is limited to files up to 5 MiB. Use get_download_link for this file." }], isError: true };
     }
     const download = await runWithDriveContext(actor, () => getDownloadUrl(id));
     if (!download.success) return toolResult(download);
-    const extracted = await extractMcpPdf(await downloadMcpBytes(download.data.url, item.size));
+    const extracted = await extractPdfText(await downloadBoundedBytes(download.data.url, item.size));
     const note = extracted.truncated ? "\n\n[Truncated to 20 pages or 64,000 text characters. Use get_download_link for the original.]" : "";
-    return { content: [{ type: "text", text: extracted.text + note }], structuredContent: { pagesRead: extracted.pagesRead, totalPages: extracted.totalPages, truncated: extracted.truncated } };
+    return { content: [{ type: "text", text: pdfPlainText(extracted) + note }], structuredContent: { pagesRead: extracted.pagesRead, totalPages: extracted.totalPages, truncated: extracted.truncated } };
   }
   if (previewKind === "image" && item.mimeType && EMBEDDABLE_IMAGE_TYPES[item.mimeType] && item.size > 0 && item.size <= MCP_IMAGE_EMBED_MAX_BYTES) {
     const download = await runWithDriveContext(actor, () => getDownloadUrl(id));
     if (!download.success) return toolResult(download);
-    const data = Buffer.from(await downloadMcpBytes(download.data.url, item.size)).toString("base64");
+    const data = Buffer.from(await downloadBoundedBytes(download.data.url, item.size)).toString("base64");
     return { content: [{ type: "image", data, mimeType: item.mimeType }] };
   }
   return {

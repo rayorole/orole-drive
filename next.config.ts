@@ -3,12 +3,12 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   poweredByHeader: false,
   serverExternalPackages: ["pdfjs-dist"],
-  outputFileTracingIncludes: {
-    "/api/mcp": [
-      "./public/pdf-assets/standard_fonts/**/*",
-      "./node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs",
-    ],
-  },
+  // PDF text extraction runs for MCP reads, chat excerpts, the search sweeper and indexing
+  // scheduled with after() by the workspace's Server Actions (which run in the "/" function).
+  outputFileTracingIncludes: Object.fromEntries(["/", "/api/mcp", "/api/cron/search-index", "/api/drive/chat"].map((route) => [route, [
+    "./public/pdf-assets/standard_fonts/**/*",
+    "./node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs",
+  ]])),
   experimental: {
     // HMR otherwise caches even no-store file streams in development.
     serverComponentsHmrCache: false,
