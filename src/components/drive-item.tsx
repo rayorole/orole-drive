@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useState, type DragEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
+import { Fragment, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import {
   Archive, ArrowUp, Code2, Download, File, FileImage, FileMusic, FileText,
   FileVideo, Folder, FolderCog, FolderInput, FolderPlus, FolderUp, Info, KeyRound, Link2, LockKeyhole,
@@ -8,11 +8,11 @@ import {
 } from "lucide-react";
 import type { DriveItem } from "@/lib/drive-types";
 import { cn } from "@/lib/utils";
-import { endItemDrag, itemDropHandlers, startItemDrag, type DropTarget } from "@/lib/drive-drag";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { DriveThumbnail } from "@/components/drive-thumbnail";
 import { ScanningIndicator } from "@/components/file-scan-badge";
+import { useDriveItemDnd } from "@/components/drive-drag";
 import {
   ContextMenu, ContextMenuContent, ContextMenuGroup, ContextMenuItem,
   ContextMenuLabel, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent,
@@ -165,7 +165,12 @@ function ItemStatus({ item }: { item: DriveItem }) {
   return <>{item.isFavorite && <Star aria-label="Favorited" className="size-3.5 shrink-0 fill-amber-400 text-amber-400" />}{item.isProtected && <LockKeyhole aria-label={item.isLocked ? "Locked folder" : "Password protected"} className="size-3.5 shrink-0 text-muted-foreground" />}{item.publicToken && <Link2 aria-label="Public link enabled" className="size-3.5 shrink-0 text-primary" />}{item.scanStatus === "scanning" && <ScanningIndicator itemId={item.id} />}{(item.scanStatus === "suspicious" || item.scanStatus === "malicious") && <ShieldAlert aria-label={item.scanStatus === "malicious" ? "Flagged as malicious" : "Flagged as suspicious"} className="size-3.5 shrink-0 text-destructive" />}</>;
 }
 
-export function DriveItems({ items, view, selected, trash = false, disabled = false, onSelect, onOpen, onOpenIntent, onAction, onMove }: {
+// Hooks can't run inside the list's map, so each row gets this small wrapper.
+function ItemDnd({ item, enabled, dragIds, children }: { item: DriveItem; enabled: boolean; dragIds: (id: string) => string[]; children: (dnd: ReturnType<typeof useDriveItemDnd>) => ReactElement }) {
+  return children(useDriveItemDnd(item, { enabled, dragIds }));
+}
+
+export function DriveItems({ items, view, selected, trash = false, disabled = false, onSelect, onOpen, onOpenIntent, onAction, draggable = false }: {
   items: DriveItem[];
   view: "grid" | "list";
   selected: ReadonlySet<string>;
@@ -175,20 +180,14 @@ export function DriveItems({ items, view, selected, trash = false, disabled = fa
   onOpen: (item: DriveItem) => void;
   onOpenIntent: (item: DriveItem) => void;
   onAction: ItemActionHandler;
-  onMove?: (ids: string[], target: DropTarget) => void;
+  /** Enables dragging items onto folders; needs a DriveDndProvider above. */
+  draggable?: boolean;
 }) {
-  const [dropOver, setDropOver] = useState<string | null | undefined>();
   const date = (value: string) => new Date(value).toLocaleDateString("en", { month: "short", day: "numeric", year: "numeric" });
   const selectedItems = items.filter((item) => selected.has(item.id));
   const targetsFor = (item: DriveItem) => selected.has(item.id) ? selectedItems : [item];
   // Dragging a selected item carries the whole selection; unlocked folders accept drops.
-  const dragProps = (item: DriveItem) => !onMove || trash || disabled ? {} : {
-    draggable: true,
-    onDragStart: (event: DragEvent<HTMLElement>) => startItemDrag(event, targetsFor(item).map((target) => target.id)),
-    onDragEnd: () => { endItemDrag(); setDropOver(undefined); },
-    ...(item.kind === "folder" && !item.isLocked ? itemDropHandlers({ id: item.id, name: item.name }, { onMove, onOver: setDropOver }) : {}),
-  };
-  const dropping = (item: DriveItem) => dropOver === item.id && "bg-primary/10 ring-2 ring-primary/60 ring-inset";
+  const dnd = { enabled: draggable && !trash && !disabled, dragIds: (id: string) => selected.has(id) ? selectedItems.map((item) => item.id) : [id] };
   function activate(event: MouseEvent<HTMLButtonElement>, item: DriveItem) {
     if (event.shiftKey || event.ctrlKey || event.metaKey) onSelect(item.id, event.shiftKey);
     else onOpen(item);
@@ -196,7 +195,7 @@ export function DriveItems({ items, view, selected, trash = false, disabled = fa
   const checkbox = (item: DriveItem) => <Checkbox checked={selected.has(item.id)} disabled={disabled} aria-label={`Select ${item.name}`} onCheckedChange={(_checked, details) => onSelect(item.id, "shiftKey" in details.event && Boolean(details.event.shiftKey))} />;
   if (view === "grid") return (
     <ul aria-label={trash ? "Trashed files and folders" : "Files and folders"} className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-4 2xl:grid-cols-5">
-      {items.map((item) => <ItemContext key={item.id} targets={targetsFor(item)} trash={trash} disabled={disabled} onAction={onAction} render={<li data-drive-item={item.id} {...dragProps(item)} className={cn("group relative min-w-0 rounded-xl border border-border/70 bg-card hover:bg-accent/40 focus-within:bg-accent/40", selected.has(item.id) && "border-ring/60 bg-accent/50", dropping(item))} />}>
+      {items.map((item) => <ItemDnd key={item.id} item={item} {...dnd}>{({ ref, dragListeners, isDragged, isOver }) => <ItemContext targets={targetsFor(item)} trash={trash} disabled={disabled} onAction={onAction} render={<li ref={ref} {...dragListeners} data-drive-item={item.id} className={cn("group relative min-w-0 rounded-xl border border-border/70 bg-card hover:bg-accent/40 focus-within:bg-accent/40", selected.has(item.id) && "border-ring/60 bg-accent/50", isDragged && "opacity-50", isOver && "bg-primary/10 ring-2 ring-primary/60")} />}>
         <div className="absolute left-3 top-4">{checkbox(item)}</div>
         <div className="absolute right-1 top-1"><ItemMenu item={item} targets={targetsFor(item)} trash={trash} disabled={disabled} onAction={onAction} /></div>
         <button disabled={disabled || (trash && item.kind === "file")} onClick={(event) => activate(event, item)} onMouseEnter={() => onOpenIntent(item)} onFocus={() => onOpenIntent(item)} className="flex w-full min-w-0 flex-col items-center rounded-xl px-3 pb-4 pt-11 text-center outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default">
@@ -205,7 +204,7 @@ export function DriveItems({ items, view, selected, trash = false, disabled = fa
           <span className="mt-1 text-xs text-muted-foreground">{item.kind === "folder" ? "Folder" : formatBytes(item.size)}</span>
           <span className="mt-1 text-[11px] text-muted-foreground">{date(trash && item.trashedAt ? item.trashedAt : item.updatedAt)}</span>
         </button>
-      </ItemContext>)}
+      </ItemContext>}</ItemDnd>)}
     </ul>
   );
   return <div className="overflow-x-auto">
@@ -219,7 +218,7 @@ export function DriveItems({ items, view, selected, trash = false, disabled = fa
         <th scope="col" className="hidden w-24 pb-3 pr-3 text-right font-medium sm:table-cell">Size</th>
         <th scope="col" className="w-10 pb-3"><span className="sr-only">Actions</span></th>
       </tr></thead>
-      <tbody>{items.map((item) => <ItemContext key={item.id} targets={targetsFor(item)} trash={trash} disabled={disabled} onAction={onAction} render={<tr data-drive-item={item.id} {...dragProps(item)} className={cn("group border-b border-border/45 last:border-0 hover:bg-accent/40 focus-within:bg-accent/40 active:bg-accent/60", selected.has(item.id) && "bg-accent/50", dropping(item))} />}>
+      <tbody>{items.map((item) => <ItemDnd key={item.id} item={item} {...dnd}>{({ ref, dragListeners, isDragged, isOver }) => <ItemContext targets={targetsFor(item)} trash={trash} disabled={disabled} onAction={onAction} render={<tr ref={ref} {...dragListeners} data-drive-item={item.id} className={cn("group border-b border-border/45 last:border-0 hover:bg-accent/40 focus-within:bg-accent/40 active:bg-accent/60", selected.has(item.id) && "bg-accent/50", isDragged && "opacity-50", isOver && "bg-primary/10 ring-2 ring-inset ring-primary/60")} />}>
         <td className="pl-2">{checkbox(item)}</td>
         <td className="p-0"><button disabled={disabled || (trash && item.kind === "file")} onClick={(event) => activate(event, item)} onMouseEnter={() => onOpenIntent(item)} onFocus={() => onOpenIntent(item)} className="flex w-full min-w-0 items-center gap-2 rounded-lg bg-transparent py-2.5 pl-1 pr-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-default">
           <DriveFileIcon item={item} /><span className="min-w-0"><span className="flex items-center gap-1.5"><span className="truncate font-medium" title={item.name}>{item.name}</span><ItemStatus item={item} /></span><span className="mt-0.5 block truncate text-xs text-muted-foreground md:hidden">{date(trash && item.trashedAt ? item.trashedAt : item.updatedAt)}{item.kind === "file" && <span className="sm:hidden"> · {formatBytes(item.size)}</span>}</span></span>
@@ -228,7 +227,7 @@ export function DriveItems({ items, view, selected, trash = false, disabled = fa
         <td className="hidden truncate pr-2 text-xs text-muted-foreground xl:table-cell">{fileType(item)}</td>
         <td className="hidden pr-3 text-right text-xs tabular-nums text-muted-foreground sm:table-cell">{item.kind === "folder" ? "—" : formatBytes(item.size)}</td>
         <td><ItemMenu item={item} targets={targetsFor(item)} trash={trash} disabled={disabled} onAction={onAction} /></td>
-      </ItemContext>)}</tbody>
+      </ItemContext>}</ItemDnd>)}</tbody>
     </table>
   </div>;
 }

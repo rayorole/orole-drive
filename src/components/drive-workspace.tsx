@@ -17,7 +17,6 @@ import { lockFolder } from "@/app/actions/folder-security";
 import { recordOpened } from "@/app/actions/drive-metadata";
 import type { DriveFilter, DriveItem, DriveListInput, DriveSort, DriveTypeFilter } from "@/lib/drive-types";
 import { optimisticDriveChange } from "@/lib/drive-cache";
-import { beginMarquee, isDraggingItems, itemDropHandlers, type DropTarget } from "@/lib/drive-drag";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,7 +36,8 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { SoundToggle } from "@/components/ui/sound";
 import { Spinner } from "@/components/spinner";
-import { DriveItems, formatBytes } from "@/components/drive-item";
+import { DriveFileIcon, DriveItems, formatBytes } from "@/components/drive-item";
+import { beginMarquee, DriveDndProvider, DroppableCrumb, type DropTarget } from "@/components/drive-drag";
 import type { DriveItemAction } from "@/components/drive-item";
 import { McpConnectionDialog } from "@/components/mcp-connection-dialog";
 import { DriveNameDialog, DrivePreviewDialog, DriveShareDialog, useDriveDownload } from "@/components/drive-dialogs";
@@ -253,10 +253,13 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
     onSettled: () => { void client.invalidateQueries({ queryKey: ["drive"] }); },
   });
   const [marquee, setMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
-  const [crumbDrop, setCrumbDrop] = useState<string | null | undefined>();
   const moveTo = (ids: string[], target: DropTarget) => { if (!actionsDisabled) moveDrop.mutate({ ids, target }); };
-  const crumbDropProps = (target: DropTarget) => trash || globalSearch ? {} : itemDropHandlers(target, { onMove: moveTo, onOver: setCrumbDrop });
-  const crumbDropClass = (id: string | null) => crumbDrop === id && "bg-primary/10 text-foreground ring-2 ring-primary/60";
+  const dragPreview = (ids: string[]) => {
+    const first = items.find((item) => item.id === ids[0]);
+    return <div className="flex w-max max-w-64 cursor-grabbing items-center gap-2 rounded-lg border border-border/70 bg-popover py-1.5 pl-1.5 pr-3 text-sm text-popover-foreground shadow-lg">
+      {first && <DriveFileIcon item={first} />}<span className="truncate font-medium">{ids.length > 1 ? `${ids.length} items` : first?.name}</span>
+    </div>;
+  };
   const lock = useMutation({
     mutationFn: (id: string) => run(() => lockFolder(id)),
     onSuccess: () => { window.dispatchEvent(new Event("drive-access-changed")); toast.success("Folder locked"); },
@@ -369,24 +372,24 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
   useEffect(() => {
     let depth = 0;
     function enter(event: DragEvent) {
-      if (!event.dataTransfer?.types.includes("Files") || isDraggingItems()) return;
+      if (!event.dataTransfer?.types.includes("Files")) return;
       event.preventDefault();
       depth++;
       if (canUpload) setDragging(true);
     }
     function over(event: DragEvent) {
-      if (!event.dataTransfer?.types.includes("Files") || isDraggingItems()) return;
+      if (!event.dataTransfer?.types.includes("Files")) return;
       event.preventDefault();
       event.dataTransfer.dropEffect = canUpload ? "copy" : "none";
     }
     function leave(event: DragEvent) {
-      if (!event.dataTransfer?.types.includes("Files") || isDraggingItems()) return;
+      if (!event.dataTransfer?.types.includes("Files")) return;
       depth = Math.max(0, depth - 1);
       if (!depth) setDragging(false);
     }
     function reset() { depth = 0; setDragging(false); }
     function drop(event: DragEvent) {
-      if (!event.dataTransfer?.types.includes("Files") || isDraggingItems()) return;
+      if (!event.dataTransfer?.types.includes("Files")) return;
       event.preventDefault();
       reset();
       if (canUpload) addDrop(event.dataTransfer, folderId);
@@ -467,6 +470,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
               }
             }
           }}>
+          <DriveDndProvider enabled={!actionsDisabled} renderPreview={dragPreview} onMove={moveTo}>
           <div className="mx-auto flex w-full max-w-[1200px] flex-1 flex-col">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div className="min-w-0">
@@ -478,8 +482,8 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
             <div className="mb-4 mt-5 flex flex-wrap items-center justify-between gap-3">
               <nav aria-label="Folder breadcrumbs" className="min-w-0 max-w-full overflow-x-auto">
                 <ol className="flex items-center gap-1 whitespace-nowrap text-xs text-muted-foreground">
-                  <li><button onClick={() => navigate(trash ? "trash" : "all")} {...(folderId ? crumbDropProps({ id: null, name: "All files" }) : {})} className={cn("min-h-8 rounded px-1 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring", crumbDropClass(null))}>{trash ? "Trash" : "All files"}</button></li>
-                  {breadcrumbs.map((crumb, index) => <li key={crumb.id} className="flex items-center gap-1"><ChevronRight className="size-3 shrink-0" /><button onClick={() => navigate(trash ? "trash" : "all", crumb.id)} aria-current={!globalSearch && index === breadcrumbs.length - 1 ? "page" : undefined} {...(index < breadcrumbs.length - 1 ? crumbDropProps({ id: crumb.id, name: crumb.name }) : {})} className={cn("min-h-8 max-w-36 truncate rounded px-1 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring", crumbDropClass(crumb.id))}>{crumb.name}</button></li>)}
+                  <li><DroppableCrumb target={{ id: null, name: "All files" }} disabled={!folderId || trash || globalSearch} onClick={() => navigate(trash ? "trash" : "all")} className="min-h-8 rounded px-1 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">{trash ? "Trash" : "All files"}</DroppableCrumb></li>
+                  {breadcrumbs.map((crumb, index) => <li key={crumb.id} className="flex items-center gap-1"><ChevronRight className="size-3 shrink-0" /><DroppableCrumb target={{ id: crumb.id, name: crumb.name }} disabled={trash || globalSearch || index === breadcrumbs.length - 1} onClick={() => navigate(trash ? "trash" : "all", crumb.id)} aria-current={!globalSearch && index === breadcrumbs.length - 1 ? "page" : undefined} className="min-h-8 max-w-36 truncate rounded px-1 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">{crumb.name}</DroppableCrumb></li>)}
                   {globalSearch && <li className="flex items-center gap-1"><ChevronRight className="size-3" /><span aria-current="page">All-folder results</span></li>}
                 </ol>
               </nav>
@@ -524,7 +528,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
               {listing.isPending ? <div aria-label="Loading files" className="flex flex-col gap-5 py-3">{Array.from({ length: 5 }, (_, index) => <div key={index} className="flex items-center gap-3"><Skeleton className="size-10 rounded-xl" /><div className="flex flex-1 flex-col gap-2"><Skeleton className="h-3 w-2/5" /><Skeleton className="h-2 w-1/5" /></div><Skeleton className="h-3 w-16" /></div>)}</div>
                 : locked ? <Empty className="mx-auto my-auto max-w-md border-0 px-0 py-12"><EmptyHeader><EmptyMedia><LockKeyhole className="size-10 text-muted-foreground" strokeWidth={1.2} /></EmptyMedia><EmptyTitle>This folder is locked</EmptyTitle><EmptyDescription>Enter the password for “{locked.name}” to see its files.</EmptyDescription></EmptyHeader><EmptyContent><Button disabled={opening} onClick={() => void unlockCurrent()}>{opening && <Spinner />}Unlock folder</Button><Button variant="ghost" onClick={() => navigate(trash ? "trash" : "all")}>Back to {trash ? "Trash" : "All files"}</Button></EmptyContent></Empty>
                 : listing.error ? <Alert variant="destructive"><TriangleAlert /><AlertTitle>We couldn’t load your files</AlertTitle><AlertDescription><p>{listing.error.message}</p><div className="mt-3 flex flex-wrap gap-2"><Button variant="outline" size="sm" onClick={() => void listing.refetch()}>Try again</Button>{globalSearch && <Button variant="outline" size="sm" onClick={() => { setSearch(""); setFilterValues([]); }}>Clear filters</Button>}{folderId && <Button variant="outline" size="sm" onClick={() => navigate(trash ? "trash" : "all")}>Back to {trash ? "Trash" : "All files"}</Button>}</div></AlertDescription></Alert>
-                : items.length ? <DriveItems items={items} view={view} selected={selected} trash={trash} disabled={actionsDisabled} onSelect={selectItem} onOpen={(item) => void openItem(item)} onOpenIntent={prefetchFolder} onAction={onItemAction} onMove={moveTo} />
+                : items.length ? <DriveItems items={items} view={view} selected={selected} trash={trash} disabled={actionsDisabled} onSelect={selectItem} onOpen={(item) => void openItem(item)} onOpenIntent={prefetchFolder} onAction={onItemAction} draggable />
                 : <Empty className="mx-auto my-auto w-full max-w-md border-0 px-0 py-12">
                   <EmptyHeader><EmptyMedia>{globalSearch ? <Search className="size-10 text-muted-foreground" strokeWidth={1.2} /> : trash ? <Trash2 className="size-10 text-muted-foreground" strokeWidth={1.2} /> : filter === "public" ? <Link2 className="size-10 text-muted-foreground" strokeWidth={1.2} /> : filter === "favorites" ? <Star className="size-10 text-muted-foreground" strokeWidth={1.2} /> : <Folder className="size-12 text-muted-foreground" strokeWidth={1.1} />}</EmptyMedia><EmptyTitle>{globalSearch ? "No matching files" : trash ? "Nothing to restore" : filter === "public" ? "No public links" : filter === "favorites" ? "No favorites yet" : currentFolder ? "This folder is empty" : "Make room for your files"}</EmptyTitle><EmptyDescription>{globalSearch ? "Try a different name, or clear the filters to see more files." : trash ? "Items you move to Trash will appear here for 30 days." : filter === "public" ? "Create a public link from a file’s menu when you want to share it outside your family." : filter === "favorites" ? "Star a file or folder from its menu to find it here quickly." : currentFolder ? `Add files to “${currentFolder.name}”, or create a folder to keep things organized.` : "Upload files or a whole folder to your family’s private drive."}</EmptyDescription></EmptyHeader>
                   <EmptyContent className="w-full">{globalSearch ? <Button variant="outline" onClick={() => { setSearch(""); setFilterValues([]); }}>Clear filters</Button> : trash || filter === "public" || filter === "favorites" ? <Button variant="outline" onClick={() => navigate("all")}>Browse all files</Button> : <><div className="flex flex-wrap justify-center gap-2">{uploadActions}</div><p className="text-xs text-muted-foreground">Or drop files and folders here.</p></>}</EmptyContent>
@@ -532,6 +536,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
             </div>
             {canUpload && items.length > 0 && <p className="mt-auto pt-8 text-center text-xs text-muted-foreground">Drop files or folders to upload to {destination}.</p>}
           </div>
+          </DriveDndProvider>
         </ContextMenuTrigger>
         <ContextMenuContent><ContextMenuGroup>
           <ContextMenuItem disabled={!canUpload} onClick={() => uploadFiles(folderId)}><ArrowUp />Upload files</ContextMenuItem>
