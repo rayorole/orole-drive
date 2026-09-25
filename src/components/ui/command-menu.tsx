@@ -187,9 +187,13 @@ function findAction(actions: CommandMenuAction[], option: CommandOptionType): Co
   return undefined;
 }
 
-export function CommandMenu({ actions, scopes, placeholder = "Type a command or search…", className }: {
+/** An entry built from what the user typed, e.g. "Search inside files for …", listed after the matches. `group` must be one the actions already use. */
+export type CommandMenuQueryAction = { id: string; group?: string; icon?: ReactNode; minLength: number; label: (query: string) => string; run: (query: string) => void };
+
+export function CommandMenu({ actions, scopes, queryAction, placeholder = "Type a command or search…", className }: {
   actions: CommandMenuAction[];
   scopes?: Record<string, { actions: CommandMenuAction[]; placeholder: string; crumb?: string }>;
+  queryAction?: CommandMenuQueryAction;
   placeholder?: string;
   className?: string;
 }) {
@@ -205,7 +209,9 @@ export function CommandMenu({ actions, scopes, placeholder = "Type a command or 
   const overlayRef = useRef<HTMLDivElement>(null);
 
   const scoped = scope ? scopes?.[scope] : undefined;
-  const current = scoped?.actions ?? actions;
+  // kmenu resolves clicks against the options it was given, so the query entry is registered (hidden)
+  // up front; the filter below relabels it with what was typed.
+  const current = scoped?.actions ?? (queryAction ? [...actions, { id: queryAction.id, group: queryAction.group, icon: queryAction.icon, label: queryAction.label(""), hidden: true }] : actions);
   // kmenu drops back to the top level whenever it receives new options, and callers rebuild their
   // actions (with fresh closures) on every render. Hand it options that only change with their
   // visible content, and run the caller's latest `action` by id when one is picked.
@@ -216,6 +222,21 @@ export function CommandMenu({ actions, scopes, placeholder = "Type a command or 
   useEffect(() => {
     latest.current = current;
   });
+  // Read at filter/select time, so a new closure each render doesn't hand kmenu a new filter.
+  const latestQueryAction = useRef(queryAction);
+  const typed = useRef("");
+  useEffect(() => {
+    latestQueryAction.current = queryAction;
+  });
+  const hasQueryAction = Boolean(queryAction) && !scoped;
+  const filter = useCallback<FilterFunctionType<CommandMenuAction>>((options, query) => {
+    const extra = latestQueryAction.current;
+    const found = filterActions(options, query).filter((option) => !extra || option.id !== extra.id);
+    typed.current = query.trim();
+    const entry = extra && options.find((option) => option.id === extra.id);
+    if (!hasQueryAction || !extra || !entry || typed.current.length < extra.minLength) return found;
+    return [...found, { ...entry, label: extra.label(typed.current) }];
+  }, [hasQueryAction]);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -293,7 +314,9 @@ export function CommandMenu({ actions, scopes, placeholder = "Type a command or 
   }, [handleClose, isClosing, open, openMenu]);
 
   const select = (option: CommandOptionType) => {
-    void findAction(latest.current, option)?.action?.();
+    const extra = latestQueryAction.current;
+    if (extra && option.id === extra.id) extra.run(typed.current);
+    else void findAction(latest.current, option)?.action?.();
     handleClose();
   };
 
@@ -313,7 +336,7 @@ export function CommandMenu({ actions, scopes, placeholder = "Type a command or 
         className,
       )}>
       <div ref={sizerRef}>
-        <CommandRoot open={open} onOpenChange={() => undefined} options={options} filter={filterActions} onSelect={select} className="flex flex-col">
+        <CommandRoot open={open} onOpenChange={() => undefined} options={options} filter={filter} onSelect={select} className="flex flex-col">
           <ScopeBackspace onLeaveScope={leaveScope} />
           <div className="flex h-12 items-center gap-2 border-b border-border/70 pl-4 pr-2.5">
             <CommandInput autoFocus placeholder={scoped?.placeholder ?? placeholder} data-slot="command-input"

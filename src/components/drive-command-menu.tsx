@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
 import {
   ArrowUp, Clock3, Download, File, Files, Folder, FolderInput, FolderPlus, FolderUp, HardDrive, LayoutGrid, Link2,
-  History, List, Moon, PanelLeft, Plug, Search, Star, StarOff, Sun, Trash2,
+  History, List, Moon, PanelLeft, Plug, Search, Star, StarOff, Sun, TextSearch, Trash2,
 } from "lucide-react";
 import { listDrive } from "@/lib/drive-read-client";
 import type { DriveFilter, DriveItem } from "@/lib/drive-types";
@@ -30,7 +30,7 @@ function itemAction(item: DriveItem, prefix: string, onOpenItem: (item: DriveIte
   };
 }
 
-export function DriveCommandMenu({ filter, items, selected, canUpload, view, collapsed, onNavigate, onOpenItem, onItemAction, onUploadFiles, onUploadFolder, onNewFolder, onViewChange, onToggleSidebar, onConnectAgent, onOpenStorage, onEmptyTrash }: {
+export function DriveCommandMenu({ filter, items, selected, canUpload, view, collapsed, onNavigate, onOpenItem, onItemAction, onUploadFiles, onUploadFolder, onNewFolder, onViewChange, onToggleSidebar, onConnectAgent, onOpenStorage, onEmptyTrash, onSearchInside }: {
   filter: DriveFilter | "activity";
   items: DriveItem[];
   selected: DriveItem[];
@@ -48,6 +48,8 @@ export function DriveCommandMenu({ filter, items, selected, canUpload, view, col
   onConnectAgent: () => void;
   onOpenStorage: () => void;
   onEmptyTrash: () => void;
+  /** Present when AI search is configured: shows "Found inside files" results for the typed query. */
+  onSearchInside?: (query: string) => void;
 }) {
   const { resolvedTheme, setTheme } = useTheme();
   const recent = useQuery({
@@ -98,5 +100,9 @@ export function DriveCommandMenu({ filter, items, selected, canUpload, view, col
     ...recentFiles.filter((item) => !items.some((here) => here.id === item.id)).map((item) => ({ ...itemAction(item, "recent-search", onOpenItem, "Recent files"), hidden: true })),
   ];
 
-  return <CommandMenu actions={actions} placeholder="Search files, views and actions…" />;
+  return <CommandMenu actions={actions} placeholder="Search files, views and actions…" queryAction={onSearchInside && {
+    // kmenu only orders (and keeps) groups that its static options already use.
+    id: "search-inside", group: "Go to", icon: <TextSearch />, minLength: 3,
+    label: (query) => `Search inside files for “${query}”`, run: onSearchInside,
+  }} />;
 }

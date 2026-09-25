@@ -51,7 +51,8 @@ import {
 } from "@/app/actions/drive";
 import { lockFolder } from "@/app/actions/folder-security";
 import { setSearchExcluded } from "@/app/actions/search";
-import { SearchAvailabilityProvider, type SearchAvailability } from "@/components/search-availability";
+import { SearchAvailabilityProvider, useSearchAvailability, type SearchAvailability } from "@/components/search-availability";
+import { CONTENT_SEARCH_MIN_CHARS, FoundInsideFiles } from "@/components/content-search";
 import { recordOpened, setFavorites } from "@/app/actions/drive-metadata";
 import { listDrive, currentDriveAccessGeneration, assertDriveAccessGeneration, cancelDriveReads } from "@/lib/drive-read-client";
 import type {
@@ -563,6 +564,9 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
   // Activity is its own view, not a listing filter: nothing is listed, selected or uploaded there.
   const activity = requestedFilter === "activity";
   const [search, setSearch] = useState("");
+  const { search: searchEnabled } = useSearchAvailability();
+  // Content matches follow the name results, so the listing stops filling the page while they show.
+  const contentSearch = searchEnabled && filter !== "trash" && search.trim().length >= CONTENT_SEARCH_MIN_CHARS;
   const [filterValues, setFilterValues] = useState<FilterValue[]>([]);
   const [sort, setSort] = useState<DriveSort | "activity">(
     filter === "recent" ? "activity" : "name",
@@ -1141,7 +1145,8 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
           return typeof key === "string" && (
             key === "drive" || key.startsWith("drive-") || key === "command-recent" ||
             key === "storage-usage" || key === "private-file-scan" ||
-            key === "text-preview" || key === "text-highlight"
+            key === "text-preview" || key === "text-highlight" ||
+            key === "semantic-search" || key === "search-status"
           );
         },
       });
@@ -1583,9 +1588,9 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
                           id="drive-global-search"
                           data-drive-search
                           type="search"
-                          aria-label="Search file names"
+                          aria-label={searchEnabled ? "Search file names and contents" : "Search file names"}
                           value={search}
-                          placeholder="Search file names…"
+                          placeholder={searchEnabled ? "Search names and contents…" : "Search file names…"}
                           onChange={(event) => setSearch(event.target.value)}
                           className="pl-8"
                         />
@@ -1791,7 +1796,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
                       </div>
                     )}
                     <div
-                      className="flex flex-1 flex-col"
+                      className={contentSearch ? "flex flex-col" : "flex flex-1 flex-col"}
                       aria-busy={listing.isFetching || stale || opening}
                       onPointerDown={(event) => {
                         if (!actionsDisabled && items.length)
@@ -2013,6 +2018,13 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
                         </Empty>
                       )}
                     </div>
+                    {contentSearch && (
+                      <FoundInsideFiles
+                        query={search}
+                        onOpen={(item) => void openItem(item, false)}
+                        onShowFolder={(target) => navigate("all", target ?? undefined)}
+                      />
+                    )}
                     {canUpload && items.length > 0 && (
                       <p className="mt-auto pt-8 text-center text-xs text-muted-foreground">
                         Drop files or folders to upload to {destination}.
@@ -2125,6 +2137,10 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
         onToggleSidebar={() => setCollapsed(!collapsed)}
         onConnectAgent={() => setMcpOpen(true)}
         onOpenStorage={openStorage}
+        onSearchInside={searchEnabled ? (query) => {
+          if (trash || activity) navigate("all");
+          setSearch(query);
+        } : undefined}
       />
       {dialog?.kind === "folder" && (
         <DriveNameDialog
