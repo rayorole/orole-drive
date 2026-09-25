@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { Cloud, Link2 } from "lucide-react";
+import { Cloud } from "lucide-react";
 import { getPublicFile } from "@/lib/storage";
 import { PublicFile } from "@/components/public-file";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -12,21 +12,15 @@ export default async function SharePage({ params }: { params: Promise<{ token: s
   const { token } = await params;
   const file = await getPublicFile(token);
   if (!file) notFound();
-  const bytes = file.item.size;
-  const size = bytes < 1024 ? `${bytes} B` : bytes < 1024 ** 2 ? `${(bytes / 1024).toFixed(1)} KB` : bytes < 1024 ** 3 ? `${(bytes / 1024 ** 2).toFixed(1)} MB` : `${(bytes / 1024 ** 3).toFixed(1)} GB`;
-  return <main className="min-h-dvh bg-background">
-    <header className="mx-auto flex max-w-5xl items-center justify-between px-5 py-6 sm:px-10">
-      <Link href="/" className="flex items-center gap-2.5 font-semibold tracking-tight"><Cloud className="size-7 text-primary" aria-hidden="true" />Orole Drive</Link>
-      <ThemeToggle />
-    </header>
-    <section className="mx-auto flex max-w-4xl flex-col items-center gap-7 px-5 pb-12 pt-8 sm:px-10 sm:pt-14">
-      <div className="flex max-w-full flex-col items-center gap-3 text-center">
-        <p className="flex items-center gap-1.5 text-sm text-muted-foreground"><Link2 className="size-4" aria-hidden="true" />Shared with you</p>
-        <h1 className="max-w-full wrap-anywhere text-2xl font-semibold tracking-tight sm:text-3xl">{file.item.name}</h1>
-        <p className="text-sm text-muted-foreground">{size}</p>
+  return <div className="flex min-h-dvh flex-col bg-background">
+    <header className="border-b border-border/60">
+      <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between px-4 sm:px-8">
+        <Link href="/" className="flex items-center gap-2 text-[13px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring"><Cloud className="size-5 text-primary" strokeWidth={1.7} aria-hidden="true" />Orole Drive</Link>
+        <ThemeToggle />
       </div>
-      <PublicFile item={file.item} token={token} previewUrl={file.previewUrl} />
-      {file.sharedByEmail && <p className="max-w-full text-center text-xs text-muted-foreground">Shared by <span className="wrap-anywhere font-medium text-foreground">{file.sharedByEmail}</span></p>}
-    </section>
-  </main>;
+    </header>
+    <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col px-4 pb-16 pt-8 sm:px-8 sm:pt-12">
+      <PublicFile item={file.item} token={token} previewUrl={file.previewUrl} sharedByEmail={file.sharedByEmail} />
+    </main>
+  </div>;
 }

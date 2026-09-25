@@ -153,6 +153,28 @@
 .t-tt[data-ending-style] { transition-duration: var(--tt-out-dur); transition-timing-function: var(--tt-out-ease); transition-delay: 0ms; }
 .t-tt[data-instant] { transition: none; }
 
+/* Code preview: line numbers are generated content, so copying never includes them. */
+.code-preview { counter-reset: code-line; tab-size: 4; }
+.code-preview .code-line { display: block; position: relative; min-height: 1lh; padding: 0 1.25rem 0 calc(var(--gutter, 3.5rem) + 1rem); }
+.code-preview .code-line::before {
+  counter-increment: code-line;
+  content: counter(code-line);
+  position: absolute; left: 0; width: var(--gutter, 3.5rem); padding-right: .25rem;
+  text-align: right; color: var(--muted-foreground); opacity: .55; font-variant-numeric: tabular-nums;
+  user-select: none; -webkit-user-select: none;
+}
+.code-preview .code-line:hover { background: color-mix(in oklab, var(--muted) 70%, transparent); }
+.code-preview .code-token { color: var(--shiki-light); font-style: var(--shiki-light-font-style); font-weight: var(--shiki-light-font-weight); text-decoration: var(--shiki-light-text-decoration); }
+.dark .code-preview .code-token { color: var(--shiki-dark); font-style: var(--shiki-dark-font-style); font-weight: var(--shiki-dark-font-weight); text-decoration: var(--shiki-dark-text-decoration); }
+
+/* Transparent images sit on a canvas checkerboard, like an image editor. */
+.image-canvas {
+  --check: color-mix(in oklab, var(--foreground) 6%, var(--background));
+  background-color: var(--background);
+  background-image: conic-gradient(var(--check) 25%, transparent 0 50%, var(--check) 0 75%, transparent 0);
+  background-size: 20px 20px;
+}
+
 @media (pointer: coarse) {
   [data-slot="button"], [data-slot="toggle-group-item"] { min-height: 2.75rem; min-width: 2.75rem; }
 }
