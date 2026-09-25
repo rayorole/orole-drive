@@ -78,6 +78,13 @@
       "when": 1790340000000,
       "tag": "0010_storage_work",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1790364178935,
+      "tag": "0011_search_index",
+      "breakpoints": true
     }
   ]
 }

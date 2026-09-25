@@ -45,3 +45,4 @@ next-env.d.ts
 /.agents/
 /.claude/
 /skills-lock.json
+!.env.example

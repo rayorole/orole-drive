@@ -42,6 +42,8 @@ export const driveItems = pgTable(
     deletionStartedAt: timestamp("deletion_started_at", { withTimezone: true }),
     passwordHash: text("password_hash"),
     passwordVersion: uuid("password_version"),
+    /** Folders only: this folder and everything inside it stay out of AI search. */
+    searchExcluded: boolean("search_excluded").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     /** Member responsible for the current bytes (quota attribution), not the immutable owner. */
@@ -70,6 +72,7 @@ export const driveItems = pgTable(
     )`),
     check("drive_items_folder_emoji_valid", sql`${table.folderEmoji} is null or (${table.kind} = 'folder' and char_length(${table.folderEmoji}) between 1 and 64)`),
     check("drive_items_password_folder_only", sql`${table.passwordHash} is null or ${table.kind} = 'folder'`),
+    check("drive_items_search_excluded_folder_only", sql`${table.searchExcluded} = false or ${table.kind} = 'folder'`),
     check("drive_items_password_version_pair", sql`(
       ${table.passwordHash} is null and ${table.passwordVersion} is null
     ) or (
@@ -193,7 +196,7 @@ export type DriveFileVersionRow = typeof driveFileVersions.$inferSelect;
 
 export const DRIVE_EVENT_ACTIONS = [
   "upload", "create_folder", "rename", "move", "copy", "trash", "restore", "delete", "empty_trash",
-  "share", "unshare", "new_version", "restore_version", "delete_version", "protect", "unprotect",
+  "share", "unshare", "new_version", "restore_version", "delete_version", "protect", "unprotect", "exclude_search", "include_search",
 ] as const;
 
 /**

@@ -8,7 +8,7 @@ function row(id: string, parentId: string | null = null, values: Partial<DriveRo
     id, parentId, name: id, kind: "folder", state: "complete", size: 0,
     mimeType: null, objectKey: null, multipartUploadId: null, etag: null,
     publicToken: null, publicExpiresAt: null, sharedByEmail: null, trashedAt: null, trashRootId: null,
-    passwordHash: null, passwordVersion: null, deletionStartedAt: null,
+    passwordHash: null, passwordVersion: null, searchExcluded: false, deletionStartedAt: null,
     description: "", tags: [], folderColor: null, folderEmoji: null, createdBy: null, replacesId: null,
     ownerId: null, accessMode: parentId ? "inherit" : "private", memberRole: "viewer",
     createdAt: new Date("2026-01-01T00:00:00Z"), updatedAt: new Date("2026-01-01T00:00:00Z"),
