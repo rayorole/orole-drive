@@ -13,7 +13,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { DriveThumbnail } from "@/components/drive-thumbnail";
 import { ScanningIndicator } from "@/components/file-scan-badge";
 import { useDriveItemDnd } from "@/components/drive-drag";
-import { TruncatedText } from "@/components/hint";
+import { Hint, TruncatedText } from "@/components/hint";
 import {
   ContextMenu, ContextMenuContent, ContextMenuGroup, ContextMenuItem,
   ContextMenuLabel, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent,
@@ -81,6 +81,7 @@ function submenu(label: string, icon: typeof Folder, entries: MenuEntry[]): Menu
 function scanEntry(file: DriveItem): MenuEntry {
   if (file.scanStatus === "scanning") return { action: "scan", label: "Scanning for viruses…", icon: ShieldCheck, disabled: true };
   if (file.scanStatus) return { action: "details", label: "View scan result", icon: file.scanStatus === "clean" ? ShieldCheck : ShieldAlert };
+  if (file.scanSuggestion) return { action: "scan", label: file.scanSuggestion.level === "high" ? "Scan for viruses — recommended" : "Scan for viruses — suggested", icon: ShieldAlert };
   return { action: "scan", label: "Scan for viruses", icon: ShieldCheck };
 }
 
@@ -169,7 +170,13 @@ function ItemContext({ render, children, targets, trash, disabled, onAction }: {
 }
 
 function ItemStatus({ item }: { item: DriveItem }) {
-  return <>{item.isFavorite && <Star aria-label="Favorited" className="size-3.5 shrink-0 fill-amber-400 text-amber-400" />}{item.isProtected && <LockKeyhole aria-label={item.isLocked ? "Locked folder" : "Password protected"} className="size-3.5 shrink-0 text-muted-foreground" />}{item.publicToken && <Link2 aria-label="Public link enabled" className="size-3.5 shrink-0 text-primary" />}{item.scanStatus === "scanning" && <ScanningIndicator itemId={item.id} />}{(item.scanStatus === "suspicious" || item.scanStatus === "malicious") && <ShieldAlert aria-label={item.scanStatus === "malicious" ? "Flagged as malicious" : "Flagged as suspicious"} className="size-3.5 shrink-0 text-destructive" />}</>;
+  return <>{item.isFavorite && <Star aria-label="Favorited" className="size-3.5 shrink-0 fill-amber-400 text-amber-400" />}{item.isProtected && <LockKeyhole aria-label={item.isLocked ? "Locked folder" : "Password protected"} className="size-3.5 shrink-0 text-muted-foreground" />}{item.publicToken && <Link2 aria-label="Public link enabled" className="size-3.5 shrink-0 text-primary" />}{item.scanStatus === "scanning" && <ScanningIndicator itemId={item.id} />}{(item.scanStatus === "suspicious" || item.scanStatus === "malicious") && <ShieldAlert aria-label={item.scanStatus === "malicious" ? "Flagged as malicious" : "Flagged as suspicious"} className="size-3.5 shrink-0 text-destructive" />}{item.scanSuggestion?.level === "high" && <ScanSuggestionIcon suggestion={item.scanSuggestion} />}</>;
+}
+
+/** Only high-risk files get a row icon; medium ones are suggested from the menu, so rows stay calm. */
+function ScanSuggestionIcon({ suggestion }: { suggestion: NonNullable<DriveItem["scanSuggestion"]> }) {
+  const label = `Scan recommended: ${suggestion.reasons.join(", ") || "this file could run code"}`;
+  return <Hint label={label}><span className="inline-flex shrink-0" tabIndex={0} aria-label={label}><ShieldAlert className="size-3.5 text-amber-600 dark:text-amber-400" aria-hidden="true" /></span></Hint>;
 }
 
 // Hooks can't run inside the list's map, so each row gets this small wrapper.

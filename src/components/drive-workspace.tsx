@@ -1,6 +1,6 @@
 "use client";
 
-import { useDeferredValue, useEffect, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useFormStatus } from "react-dom";
 import { usePathname, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -51,6 +51,7 @@ import { DriveMetadataDialog } from "@/components/drive-metadata-ui";
 import { AgentConnectButton, StorageCard } from "@/components/sidebar-status";
 import { ScanFileDialog } from "@/components/file-scan-badge";
 import { Hint, TruncatedText } from "@/components/hint";
+import { Kbd } from "@/components/ui/cubby-ui/kbd";
 
 type FamilyUser = { name: string; email: string };
 type OpenDialog = { kind: "folder"; parentId: string | null }
@@ -109,30 +110,32 @@ function LogoutButton({ uploading }: { uploading: boolean }) {
   return <Hint label={uploading ? "Wait for uploads to finish" : "Sign out"}><Button type="submit" variant="ghost" size="icon" disabled={pending || uploading} aria-label={uploading ? "Wait for uploads to finish before signing out" : "Sign out"}>{pending ? <Spinner /> : <LogOut />}</Button></Hint>;
 }
 
-function DriveSidebar({ user, filter, totalBytes, totalFiles, navigate, uploading, search, onSearch, collapsed = false, onExpand, onConnect }: {
+function DriveSidebar({ user, filter, totalBytes, totalFiles, navigate, uploading, collapsed = false }: {
   user: FamilyUser;
   filter: DriveFilter;
   totalBytes?: number;
   totalFiles?: number;
   navigate: (filter: DriveFilter, folderId?: string) => void;
   uploading: boolean;
-  search: string;
-  onSearch: (value: string) => void;
   collapsed?: boolean;
-  onExpand?: () => void;
-  onConnect: () => void;
 }) {
   const labelClass = cn("origin-left whitespace-nowrap motion-safe:transition-[opacity,transform] motion-safe:duration-170", collapsed && "pointer-events-none w-0 -translate-x-1.5 scale-[.84] opacity-0");
+  // Read after hydration so the server's markup (Ctrl) never mismatches a Mac's.
+  const mac = useSyncExternalStore(() => () => {}, () => /mac/i.test(navigator.userAgent), () => false);
   return <div className="flex h-full flex-col overflow-hidden">
     <button onClick={() => navigate("all")} aria-label="Orole Drive, all files" className={cn("flex h-12 shrink-0 items-center gap-2.5 overflow-hidden px-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring", collapsed && "justify-center gap-0")}>
       <Cloud className="size-5 shrink-0 text-primary" strokeWidth={1.7} />
       <span className={cn("text-[13px] font-medium", labelClass)}>Orole Drive</span>
     </button>
     <div className={cn("mt-2 px-3", collapsed && "flex justify-center")}>
-      {collapsed ? <Button variant="ghost" size="icon" aria-label="Expand sidebar to search" onClick={onExpand}><Search /></Button> : <div className="relative">
-        <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
-        <Input data-drive-search type="search" aria-label="Search family files" placeholder="Search files…" value={search} onChange={(event) => onSearch(event.target.value)} className="pl-8" />
-      </div>}
+      {collapsed
+        ? <Hint label="Search (Ctrl or ⌘ K)" side="right"><Button variant="ghost" size="icon" aria-label="Search files and commands" onClick={() => openCommandMenu()}><Search /></Button></Hint>
+        : <button type="button" onClick={() => openCommandMenu()} aria-label="Search files and commands" aria-keyshortcuts="Control+K Meta+K"
+          className="flex h-8 w-full items-center gap-2 rounded-lg border border-input bg-transparent pl-2.5 pr-1.5 text-left text-sm text-muted-foreground outline-none transition-colors hover:bg-sidebar-accent/65 hover:text-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30">
+          <Search className="size-3.5 shrink-0" aria-hidden="true" />
+          <span className="min-w-0 flex-1 truncate">Search files…</span>
+          <Kbd size="sm" aria-hidden="true">{mac ? "⌘K" : "Ctrl K"}</Kbd>
+        </button>}
     </div>
     <div className={cn("mt-6 overflow-hidden px-5 text-xs text-muted-foreground", labelClass)} aria-hidden={collapsed}>Private workspace</div>
     <nav aria-label="Drive navigation" className="mt-2 flex flex-col gap-0.5 px-3">
@@ -140,7 +143,6 @@ function DriveSidebar({ user, filter, totalBytes, totalFiles, navigate, uploadin
     </nav>
     <div className="mt-auto flex flex-col gap-4 pt-10">
       <StorageCard totalBytes={totalBytes} totalFiles={totalFiles} collapsed={collapsed} />
-      <AgentConnectButton collapsed={collapsed} onConnect={onConnect} />
       <Separator />
       <div className={cn("flex items-center gap-2 px-3 pb-3", collapsed && "flex-col")}>
         <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-sidebar-accent text-xs font-medium" aria-hidden="true">{(user.name || user.email).slice(0, 1).toUpperCase()}</span>
@@ -465,7 +467,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
   return <div className="flex min-h-dvh bg-background">
     <a href="#drive-content" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-background focus:px-4 focus:py-3 focus:ring-2 focus:ring-ring">Skip to files</a>
     <aside id="drive-sidebar" className={cn("sticky top-0 hidden h-dvh shrink-0 border-r border-sidebar-border bg-sidebar md:block motion-safe:transition-[width] motion-safe:duration-[240ms] motion-safe:ease-[cubic-bezier(.5,0,.1,1)]", collapsed ? "w-[72px]" : "w-[230px]")}>
-      <DriveSidebar user={user} filter={filter} totalBytes={data?.totalBytes} totalFiles={data?.totalFiles} navigate={navigate} uploading={uploads.pending > 0} search={search} onSearch={setSearch} collapsed={collapsed} onExpand={() => setCollapsed(false)} onConnect={() => setMcpOpen(true)} />
+      <DriveSidebar user={user} filter={filter} totalBytes={data?.totalBytes} totalFiles={data?.totalFiles} navigate={navigate} uploading={uploads.pending > 0} collapsed={collapsed} />
     </aside>
     <div className="flex min-w-0 flex-1 flex-col">
       <header className="sticky top-0 z-20 flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border/65 bg-background/95 px-3 backdrop-blur-sm sm:px-5">
@@ -474,7 +476,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
           <Button className="hidden md:inline-flex" variant="ghost" size="icon" aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!collapsed} aria-controls="drive-sidebar" onClick={() => setCollapsed(!collapsed)}><PanelLeft /></Button>
           <span className="truncate text-[13px] font-medium">Private workspace</span>
         </div>
-        <div className="flex items-center gap-2"><Hint label={"Command menu (Ctrl or ⌘ K / F)"}><Button variant="ghost" size="icon" aria-label="Open command menu" onClick={() => openCommandMenu()}><Search /></Button></Hint><SoundToggle className="size-8 rounded-lg" /><ThemeToggle /></div>
+        <div className="flex items-center gap-2"><AgentConnectButton onConnect={() => setMcpOpen(true)} /><SoundToggle className="size-8 rounded-lg" /><ThemeToggle /></div>
       </header>
       <ContextMenu>
         <ContextMenuTrigger render={<main id="drive-content" tabIndex={-1} className="flex flex-1 flex-col px-4 pb-16 pt-7 outline-none sm:px-7 lg:px-9" />}
@@ -594,7 +596,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
       </ContextMenu>
     </div>
     <input ref={fileInput} type="file" multiple className="hidden" aria-label="Choose files to upload" onChange={(event) => { const files = Array.from(event.target.files ?? []); if (files.length) uploads.addFiles(files, uploadTarget.current); event.target.value = ""; }} />
-    <Dialog open={mobileNav} onOpenChange={setMobileNav}><DialogContent className="h-[min(680px,90dvh)] sm:max-w-sm"><DialogHeader className="sr-only"><DialogTitle>Drive navigation</DialogTitle><DialogDescription>Browse your family’s shared files and manage your account.</DialogDescription></DialogHeader><DriveSidebar user={user} filter={filter} totalBytes={data?.totalBytes} totalFiles={data?.totalFiles} navigate={navigate} uploading={uploads.pending > 0} search={search} onSearch={setSearch} onConnect={() => { setMobileNav(false); setMcpOpen(true); }} /></DialogContent></Dialog>
+    <Dialog open={mobileNav} onOpenChange={setMobileNav}><DialogContent className="h-[min(680px,90dvh)] sm:max-w-sm"><DialogHeader className="sr-only"><DialogTitle>Drive navigation</DialogTitle><DialogDescription>Browse your family’s shared files and manage your account.</DialogDescription></DialogHeader><DriveSidebar user={user} filter={filter} totalBytes={data?.totalBytes} totalFiles={data?.totalFiles} navigate={navigate} uploading={uploads.pending > 0} /></DialogContent></Dialog>
     <McpConnectionDialog open={mcpOpen} onOpenChange={setMcpOpen} />
     <DriveCommandMenu filter={filter} items={items} selected={selectedItems} canUpload={canUpload} view={view} collapsed={collapsed}
       onNavigate={(target) => navigate(target)} onOpenItem={(item) => void openItem(item)} onItemAction={onItemAction}

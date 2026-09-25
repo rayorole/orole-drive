@@ -1,4 +1,4 @@
-import { index, pgTable, text, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
+import { index, pgTable, real, text, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
 import { driveItems } from "@/lib/drive-schema";
 
 export const driveVirusScans = pgTable("drive_virus_scans", {
@@ -14,3 +14,16 @@ export const driveVirusScans = pgTable("drive_virus_scans", {
 ]);
 
 export type DriveVirusScanRow = typeof driveVirusScans.$inferSelect;
+
+/** How worth scanning a file looks from its name and declared type; decides which files are looked up first. */
+export const driveFileRisks = pgTable("drive_file_risks", {
+  itemId: uuid("item_id").primaryKey().references(() => driveItems.id, { onDelete: "cascade" }),
+  level: text("level", { enum: ["low", "medium", "high"] }).notNull(),
+  /** Jev's risk score from 0 (benign) to 3 (very likely malicious); null when only local signals were used. */
+  score: real("score"),
+  disguisedProbability: real("disguised_probability"),
+  signals: text("signals").array().notNull().default([]),
+  checkedAt: timestamp("checked_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type DriveFileRiskRow = typeof driveFileRisks.$inferSelect;

@@ -5,6 +5,8 @@ import type { DriveContext, DriveTransaction } from "@/lib/drive-access";
 import type { DriveRow } from "@/lib/drive-schema";
 import type { ActionResult, DriveArchiveManifest, DriveItem, DriveListInput, DriveListing, DriveRestoreResult, UploadTicket } from "@/lib/drive-types";
 import { randomUUID } from "node:crypto";
+// Aliased: `after` is also the listing's "modified after" date filter.
+import { after as afterResponse } from "next/server";
 import { and, arrayContains, asc, count, desc, eq, gte, ilike, inArray, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import { assertItemAccess, assertItemsAccess, canAccessPublic, driveAction, getItemAccess, getItemsAccess, visibleItemsCondition, withDriveTransaction } from "@/lib/drive-access";
@@ -16,7 +18,12 @@ import { abortMultipartUpload, commitUpload, copyFileObject, createMultipartUplo
 import { permanentlyDeleteDriveItems, restoreDriveItems, trashDriveItems } from "@/lib/trash";
 import { queueScanSubmission } from "@/lib/virus-scan-jobs";
 import { copyName } from "@/lib/copy-name";
-import { driveVirusScans } from "@/lib/virustotal-schema";
+import { SIGNAL_LABELS, type FileRiskSignal } from "@/lib/file-risk-signals";
+import { prioritizeScans } from "@/lib/file-risk";
+import { driveFileRisks, driveVirusScans } from "@/lib/virustotal-schema";
+
+/** Files assessed per listing in the background, so older files get risk scores without a batch job. */
+const RISK_BACKFILL_PER_LISTING = 10;
 
 const idSchema = z.uuid("Choose a valid file or folder.");
 const idsSchema = z.array(idSchema).min(1, "Choose at least one file or folder.").max(1000, "Choose up to 1,000 items at a time.").transform((ids) => [...new Set(ids)]);
@@ -133,12 +140,23 @@ export async function listDrive(input: DriveListInput = {}): Promise<ActionResul
       const fileIds = rows.filter((row) => row.kind === "file").map((row) => row.id);
       const scans = fileIds.length ? new Map((await tx.select({ id: driveVirusScans.itemId, status: driveVirusScans.status })
         .from(driveVirusScans).where(inArray(driveVirusScans.itemId, fileIds))).map((scan) => [scan.id, scan.status])) : new Map<string, string>();
+      const risks = new Map<string, { level: "low" | "medium" | "high"; signals: string[] }>(fileIds.length ? (await tx.select({ id: driveFileRisks.itemId, level: driveFileRisks.level, signals: driveFileRisks.signals })
+        .from(driveFileRisks).where(inArray(driveFileRisks.itemId, fileIds))).map((risk) => [risk.id, risk]) : []);
       const scanStatus = (id: string) => {
         const status = scans.get(id);
         return status === "pending" ? "scanning" as const : status === "clean" || status === "suspicious" || status === "malicious" ? status : undefined;
       };
+      // Suggest a scan only while there's no result to show instead.
+      const scanSuggestion = (id: string) => {
+        const risk = risks.get(id);
+        if (!risk || (risk.level !== "medium" && risk.level !== "high") || scanStatus(id)) return undefined;
+        return { level: risk.level, reasons: risk.signals.flatMap((signal) => SIGNAL_LABELS[signal as FileRiskSignal] ?? []) };
+      };
+      // Never assessed: score them after this response. Protected folders stay private, even their file names.
+      const unassessed = rows.filter((row) => row.kind === "file" && !risks.has(row.id) && !access.get(row.id)!.isProtected).slice(0, RISK_BACKFILL_PER_LISTING).map((row) => row.id);
+      if (unassessed.length) afterResponse(() => prioritizeScans(unassessed));
       return {
-        items: rows.map((row) => ({ ...toDriveItem(row), ...access.get(row.id)!, isFavorite: favoriteIds.has(row.id), scanStatus: scanStatus(row.id) })),
+        items: rows.map((row) => ({ ...toDriveItem(row), ...access.get(row.id)!, isFavorite: favoriteIds.has(row.id), scanStatus: scanStatus(row.id), scanSuggestion: scanSuggestion(row.id) })),
         breadcrumbs: path.map(({ id, name }) => ({ id, name })),
         currentFolder: current ? { ...toDriveItem(current), ...access.get(current.id)!, isFavorite: favoriteIds.has(current.id) } : null,
         totalBytes: totals.totalBytes, totalFiles: totals.totalFiles,
@@ -201,6 +219,8 @@ export async function completeUpload(id: string): Promise<ActionResult<DriveItem
     // Never remove staging before the database commit: a rolled-back single PUT
     // completion must still be retryable with the original verified source.
     await removeStagedObject(result.row).catch(() => undefined);
+    // Score the new file and, if it looks risky, look it up on VirusTotal ahead of everything else.
+    if (!result.item.isProtected) afterResponse(() => prioritizeScans([result.row.id]));
     return result.item;
   });
 }

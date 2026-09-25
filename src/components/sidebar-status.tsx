@@ -73,21 +73,19 @@ export function useConnectedAgents() {
   });
 }
 
-/** Opens the connection dialog; shows a green dot and the count once an assistant is connected. */
-export function AgentConnectButton({ collapsed, onConnect }: { collapsed: boolean; onConnect: () => void }) {
+/** Header trigger for the MCP dialog; once an assistant is connected it shows the count with a live green dot. */
+export function AgentConnectButton({ onConnect }: { onConnect: () => void }) {
   const agents = useConnectedAgents().data;
   const count = agents?.count ?? 0;
-  const label = count ? `${count} ${count === 1 ? "agent" : "agents"} connected` : "Connect an agent";
+  const label = count ? `${count} ${count === 1 ? "Agent" : "Agents"} connected` : "Connect MCP";
   const title = count ? `${label}: ${agents!.names.join(", ")}` : "Connect an AI assistant with MCP";
-  const dot = <span className="relative flex size-2 shrink-0" aria-hidden="true">
-    <span className="absolute inline-flex size-full rounded-full bg-emerald-500 opacity-60 motion-safe:animate-ping [animation-duration:2.5s]" />
-    <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
-  </span>;
-  return <div className="px-3">
-    <Hint label={title} side="right"><Button variant="ghost" className={cn("relative w-full justify-start", collapsed && "justify-center px-0")} aria-label={label} onClick={onConnect}>
-      <Plug />
-      {!collapsed && <span className="min-w-0 flex-1 truncate text-left">{label}</span>}
-      {count > 0 && (collapsed ? <span className="absolute right-2 top-1.5">{dot}</span> : dot)}
-    </Button></Hint>
-  </div>;
+  return <Hint label={title}><Button variant="outline" size="sm" aria-label={label} onClick={onConnect}>
+    {count > 0
+      ? <span className="relative flex size-2 shrink-0" aria-hidden="true">
+        <span className="absolute inline-flex size-full rounded-full bg-emerald-500 opacity-60 motion-safe:animate-ping [animation-duration:2.5s]" />
+        <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+      </span>
+      : <Plug data-icon="inline-start" />}
+    <span className="max-sm:sr-only">{label}</span>
+  </Button></Hint>;
 }

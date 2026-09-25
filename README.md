@@ -25,6 +25,7 @@ Install Node.js 24 and provide these environment variables in `.env.local` (neve
 - `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`: bucket-scoped object read/write credentials.
 - `VIRUSTOTAL_API_KEY`: optional; enables hash-report lookup and explicitly approved file submissions.
 - `CRON_SECRET`: strong random secret required for Vercel's authenticated daily Trash cleanup.
+- `AI_GATEWAY_API_KEY`: optional; Vercel AI Gateway key used to score file risk with TypeSafe's Jev model. Deployments on Vercel can use OIDC instead.
 
 ```sh
 npm ci
@@ -62,6 +63,8 @@ Generate a migration after changing a schema with `npm run db:generate`; inspect
 ## VirusTotal and memory safety
 
 Opening a private file's Details can look up its SHA-256 report; automatic hashing is limited to 100 MiB. File contents are submitted only after a signed-in writer confirms that VirusTotal may retain and distribute them to security partners and customers. Public share visitors can read saved status but cannot submit files or trigger file downloads for scanning.
+
+**Scan priority.** Every new upload, and up to ten never-assessed files per folder listing, gets a risk level. Local checks flag programs, scripts, macro documents, disk images, archives, double extensions (`invoice.pdf.exe`), names padded to hide their extension, and a declared type that doesn't match the name. Jev (`typesafe-ai/jev` via the AI SDK's `experimental_evaluate`) then scores the file 0–3 and estimates whether it is disguised. Disguise evidence is always high risk; otherwise a score of 2 or more (or likely disguise) is high, and anything that can run code is at least medium. High-risk files are looked up on VirusTotal by hash straight away, before any other file, and show an amber shield with the reasons; medium ones get "Scan for viruses — suggested" in their menu. Only the name, extension, declared type, size and local signals are sent to Jev, never contents. Files in password-protected folders are skipped. Without a gateway key, the local checks alone decide the level.
 
 VirusTotal submissions are limited to **650 MB (650,000,000 bytes)**, independently of the drive's 5 GiB storage limit. Larger files are rejected before opening a storage request. Eligible uploads use native HTTPS and backpressure-aware multipart streaming, with exact byte-count checks, cancellation, deadlines, and at most two active file streams per server process. Analysis IDs are saved so pending scans can refresh without resubmitting the file. “No detections” is not a guarantee of safety.
 

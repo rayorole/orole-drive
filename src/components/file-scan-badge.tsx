@@ -180,6 +180,7 @@ export function ScanFileDialog({ item, onClose }: { item: DriveItem; onClose: ()
         <AlertDialogDescription>
           The whole file is sent to VirusTotal, which keeps it and may share it with security partners. Don’t scan private or personal files.
         </AlertDialogDescription>
+        {item.scanSuggestion && item.scanSuggestion.reasons.length > 0 && <p className="text-sm text-amber-700 dark:text-amber-400">Recommended because: {item.scanSuggestion.reasons.join(", ").toLowerCase()}.</p>}
       </AlertDialogHeader>
       {submit.isError && <p role="alert" className="text-sm text-destructive">{submit.error.message}</p>}
       <AlertDialogFooter>

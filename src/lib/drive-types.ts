@@ -18,6 +18,8 @@ export type DriveItem = {
   isFavorite: boolean;
   /** Virus scan state for files; absent when never scanned or the scan found nothing to report. */
   scanStatus?: DriveScanStatus;
+  /** Files that look worth scanning (for example `invoice.pdf.exe`) and have no scan result yet. */
+  scanSuggestion?: { level: "medium" | "high"; reasons: string[] };
 };
 export type DriveScanStatus = "scanning" | "clean" | "suspicious" | "malicious";
 export const FOLDER_COLORS = ["blue", "green", "amber", "red", "violet", "gray"] as const;
