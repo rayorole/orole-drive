@@ -260,9 +260,9 @@ function play(patch: { play: (name: string, opts?: object) => unknown }, cue: Cu
   });
 }
 
-// Orole's command menu is a Dialog with a combobox + listbox, not Kobra's `.command-overlay`.
-const COMMAND_OVERLAY = '.command-overlay, [data-slot="dialog-content"]:has(#command-menu-list)';
-const COMMAND_OPTION = '.command-option, #command-menu-list [role="option"]';
+// The command menu is one overlay: options are read from its rows, not from `data-slot` like the rest.
+const COMMAND_OVERLAY = ".command-overlay";
+const COMMAND_OPTION = ".command-option";
 
 // Kobra names its OTP slot `input-otp`; Orole's is `otp-input`, one <input> per cell.
 const OTP_INPUT = '[data-slot="input-otp"], [data-slot="otp-input"]';
@@ -298,6 +298,10 @@ function isOn(el: Element) {
 
 function classify(el: HTMLElement): Cue | null {
   const slot = el.dataset.slot ?? "";
+
+  // A context-menu trigger is a region (the file area, a row), not a control: a left click on it
+  // does nothing, and right-click already plays `open` from the contextmenu listener.
+  if (slot === "context-menu-trigger") return null;
 
   const named = el.dataset.sound;
   if (named && named in PATCH.sounds) return { sound: named as SoundName };

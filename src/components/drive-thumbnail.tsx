@@ -6,6 +6,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getThumbnailUrl } from "@/app/actions/thumbnails";
 import { canThumbnail, getPreviewKind } from "@/lib/file-preview";
 import type { DriveItem } from "@/lib/drive-types";
+import { Hint } from "@/components/hint";
 
 export function DriveThumbnail({ item, fallback }: { item: DriveItem; fallback: ReactNode }) {
   const container = useRef<HTMLSpanElement>(null);
@@ -46,12 +47,12 @@ export function DriveThumbnail({ item, fallback }: { item: DriveItem; fallback: 
   });
   const url = eligible ? thumbnail.data : null;
   const unavailable = getPreviewKind(item) === "image" && (!eligible || thumbnail.isError || thumbnail.data === null || failedUrl === url);
-  return <span ref={container} className="flex size-full min-h-12 items-center justify-center overflow-hidden" title={unavailable ? "Thumbnail unavailable. Open the file to preview or download it." : undefined}>
+  return <Hint label={unavailable ? "Thumbnail unavailable. Open the file to preview or download it." : null}><span ref={container} className="flex size-full min-h-12 items-center justify-center overflow-hidden">
     {url && failedUrl !== url ?
       // Do not route private signed derivatives through a public image optimizer cache.
       // eslint-disable-next-line @next/next/no-img-element
       <img src={url} alt="" width={320} height={240} loading="lazy" decoding="async" referrerPolicy="no-referrer" className="size-full object-contain" onError={() => setFailedUrl(url)} />
       : fallback}
     {unavailable && <span className="sr-only">Thumbnail unavailable</span>}
-  </span>;
+  </span></Hint>;
 }

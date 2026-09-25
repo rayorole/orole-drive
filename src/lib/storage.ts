@@ -252,6 +252,25 @@ export async function commitUpload(row: DriveRow): Promise<string> {
   return verifyUpload(row, true);
 }
 
+/**
+ * Duplicates a stored file for a copy: R2 copies the bytes server-side, nothing is downloaded.
+ * The copy gets the target's own object key and upload-id metadata, so it verifies like any finished upload.
+ */
+export async function copyFileObject(source: DriveRow, target: DriveRow): Promise<string> {
+  if (source.state !== "complete" || !source.etag) throw new DriveError("This file is not available to copy.");
+  const { client, bucket } = storage();
+  await client.send(new CopyObjectCommand({
+    Bucket: bucket,
+    Key: objectKey(target),
+    CopySource: `${encodeURIComponent(bucket)}/${objectKey(source)}`,
+    CopySourceIfMatch: source.etag,
+    MetadataDirective: "REPLACE",
+    ContentType: target.mimeType ?? undefined,
+    Metadata: { "upload-id": target.id },
+  }));
+  return verifyUpload(target, true);
+}
+
 export async function removeStagedObject(row: DriveRow) {
   if (row.multipartUploadId) return;
   const { client, bucket } = storage();

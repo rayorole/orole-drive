@@ -5,6 +5,7 @@ import { Maximize, Minimize, ZoomIn, ZoomOut } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Hint } from "@/components/hint";
 
 const STEPS = [0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8];
 
@@ -108,10 +109,10 @@ export function ImageViewer({ src, alt, onError }: { src: string; alt: string; o
     <div className="flex min-h-11 items-center gap-1 border-t border-border/70 px-2 sm:px-3">
       <span className="px-1.5 text-xs tabular-nums text-muted-foreground">{natural ? `${natural.width.toLocaleString()} × ${natural.height.toLocaleString()} px` : "Loading image…"}</span>
       <div className="ml-auto flex items-center gap-0.5">
-        <Button variant="ghost" size="icon-sm" aria-label="Zoom out" title="Zoom out (−)" disabled={!natural || zoom === null} onClick={() => step(-1)}><ZoomOut /></Button>
-        <Button variant="ghost" size="sm" className="min-w-14 tabular-nums" disabled={!natural} aria-label={percent === null ? "Fitted to view. Show actual size" : `Zoom ${percent}%. Fit to view`} title={percent === null ? "Show actual size" : "Fit to view (0)"} onClick={() => applyZoom(zoom === null ? 1 : null)}>{percent === null ? "Fit" : `${percent}%`}</Button>
-        <Button variant="ghost" size="icon-sm" aria-label="Zoom in" title="Zoom in (+)" disabled={!canZoomIn} onClick={() => step(1)}><ZoomIn /></Button>
-        <Button variant="ghost" size="icon-sm" aria-label={fullscreen ? "Exit full screen" : "Full screen"} onClick={toggleFullscreen}>{fullscreen ? <Minimize /> : <Maximize />}</Button>
+        <Hint label="Zoom out (−)"><Button variant="ghost" size="icon-sm" aria-label="Zoom out" disabled={!natural || zoom === null} onClick={() => step(-1)}><ZoomOut /></Button></Hint>
+        <Hint label={percent === null ? "Show actual size" : "Fit to view (0)"}><Button variant="ghost" size="sm" className="min-w-14 tabular-nums" disabled={!natural} aria-label={percent === null ? "Fitted to view. Show actual size" : `Zoom ${percent}%. Fit to view`} onClick={() => applyZoom(zoom === null ? 1 : null)}>{percent === null ? "Fit" : `${percent}%`}</Button></Hint>
+        <Hint label="Zoom in (+)"><Button variant="ghost" size="icon-sm" aria-label="Zoom in" disabled={!canZoomIn} onClick={() => step(1)}><ZoomIn /></Button></Hint>
+        <Hint label={fullscreen ? "Exit full screen" : "Full screen"}><Button variant="ghost" size="icon-sm" aria-label={fullscreen ? "Exit full screen" : "Full screen"} onClick={toggleFullscreen}>{fullscreen ? <Minimize /> : <Maximize />}</Button></Hint>
       </div>
     </div>
   </div>;

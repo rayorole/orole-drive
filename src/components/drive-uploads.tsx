@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/cubby-ui/progress";
 import { Spinner } from "@/components/spinner";
 import { formatBytes } from "@/components/drive-item";
+import { TruncatedText } from "@/components/hint";
 
 type UploadStatus = "queued" | "preparing" | "uploading" | "saving" | "complete" | "cancelled" | "error";
 type UploadJob = {
@@ -334,7 +335,7 @@ export function DriveUploadQueue({ uploads }: { uploads: DriveUploads }) {
         {preparations.map((preparation) => <div key={preparation.key} className="flex items-start gap-3 border-b px-4 py-3 last:border-0">
           <FolderUp className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
           <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-            <p className="truncate text-sm" title={preparation.name}>{preparation.name}</p>
+            <TruncatedText as="p" className="text-sm">{preparation.name}</TruncatedText>
             <p role={preparation.status === "error" ? "alert" : undefined} className={preparation.status === "error" ? "break-words text-xs text-destructive" : "break-words text-xs text-muted-foreground"}>{preparation.message}</p>
           </div>
           {preparation.status === "preparing" && <Button variant="ghost" size="icon-sm" aria-label={`Cancel upload of ${preparation.name}`} onClick={() => cancel(preparation.key)}><X /></Button>}
@@ -343,7 +344,7 @@ export function DriveUploadQueue({ uploads }: { uploads: DriveUploads }) {
         {jobs.map((job) => <div key={job.key} className="flex items-start gap-3 border-b px-4 py-3 last:border-0">
           <Upload className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
           <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-            <p className="truncate text-sm" title={job.file.name}>{job.file.name}</p>
+            <TruncatedText as="p" className="text-sm">{job.file.name}</TruncatedText>
             {(job.status === "uploading" || job.status === "saving") && <Progress size="sm" value={job.progress} aria-label={`Uploading ${job.file.name}`} />}
             <p className={job.status === "error" ? "break-words text-xs tabular-nums text-destructive" : "break-words text-xs tabular-nums text-muted-foreground"}>
               {job.status === "queued" ? "Waiting to upload" : job.status === "preparing" ? "Preparing upload…" : job.status === "uploading" ? <>

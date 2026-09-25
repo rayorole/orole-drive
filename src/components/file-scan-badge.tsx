@@ -13,6 +13,7 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Spinner } from "@/components/spinner";
+import { Hint } from "@/components/hint";
 
 const STATUS_META = {
   unknown: { label: "No scan result", icon: ShieldQuestion, variant: "secondary" as const },
@@ -139,9 +140,9 @@ function useWatchedScan(itemId: string, { refreshWhenSettled }: { refreshWhenSet
 /** Small icon next to a file name in the drive while it is being scanned. */
 export function ScanningIndicator({ itemId }: { itemId: string }) {
   useWatchedScan(itemId, { refreshWhenSettled: true });
-  return <span title="Scanning for viruses" className="inline-flex shrink-0">
+  return <Hint label="Scanning for viruses"><span className="inline-flex shrink-0">
     <ShieldQuestion aria-label="Scanning for viruses" className="size-3.5 animate-pulse text-muted-foreground" />
-  </span>;
+  </span></Hint>;
 }
 
 /** One-line scan state, for places with no room for the full badge (the share dialog). */

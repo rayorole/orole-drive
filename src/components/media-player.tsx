@@ -5,6 +5,7 @@ import { Slider } from "@base-ui/react/slider";
 import { Maximize, Minimize, Music, Pause, PictureInPicture2, Play, RotateCcw, RotateCw, Volume1, Volume2, VolumeX } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Spinner } from "@/components/spinner";
+import { Hint, TruncatedText } from "@/components/hint";
 
 export type PlaybackState = { time: number; paused: boolean };
 type Tone = "overlay" | "surface";
@@ -23,11 +24,11 @@ function formatTime(seconds: number) {
 function ControlButton({ tone, label, onClick, children, className, pressed }: {
   tone: Tone; label: string; onClick: () => void; children: ReactNode; className?: string; pressed?: boolean;
 }) {
-  return <button type="button" aria-label={label} title={label} aria-pressed={pressed} onClick={onClick} className={cn(
+  return <Hint label={label}><button type="button" aria-label={label} aria-pressed={pressed} onClick={onClick} className={cn(
     "inline-flex size-9 shrink-0 items-center justify-center rounded-lg outline-none transition-colors [&_svg]:size-[18px] focus-visible:ring-2",
     tone === "overlay" ? "text-white hover:bg-white/15 focus-visible:ring-white/80" : "text-foreground hover:bg-muted focus-visible:ring-ring",
     className,
-  )}>{children}</button>;
+  )}>{children}</button></Hint>;
 }
 
 /** A thin track that thickens on interaction, with a buffered-range layer the native element doesn't expose. */
@@ -139,10 +140,10 @@ function VolumeControl({ tone, player }: { tone: Tone; player: ReturnType<typeof
 }
 
 function RateButton({ tone, player }: { tone: Tone; player: ReturnType<typeof useMediaState> }) {
-  return <button type="button" onClick={player.controls.cycleRate} aria-label={`Playback speed ${player.rate}×. Change speed`} title="Playback speed" className={cn(
+  return <Hint label="Playback speed"><button type="button" onClick={player.controls.cycleRate} aria-label={`Playback speed ${player.rate}×. Change speed`} className={cn(
     "inline-flex h-9 min-w-11 shrink-0 items-center justify-center rounded-lg px-2 text-xs font-semibold tabular-nums outline-none transition-colors focus-visible:ring-2",
     tone === "overlay" ? "text-white hover:bg-white/15 focus-visible:ring-white/80" : "text-foreground hover:bg-muted focus-visible:ring-ring",
-  )}>{player.rate}×</button>;
+  )}>{player.rate}×</button></Hint>;
 }
 
 export function VideoPlayer({ src, title, resume, onFailure }: { src: string; title: string; resume?: PlaybackState; onFailure: (state: PlaybackState) => void }) {
@@ -230,7 +231,7 @@ export function AudioPlayer({ src, title, detail, resume, onFailure }: { src: st
         {player.waiting && player.playing ? <Spinner size={22} label="Buffering" /> : player.playing ? <Pause className="size-6 fill-current" /> : player.ended ? <RotateCcw className="size-6" /> : <Play className="ml-0.5 size-6 fill-current" />}
       </button>
       <div className="min-w-0">
-        <p className="truncate text-[15px] font-medium" title={title}>{title}</p>
+        <TruncatedText as="p" className="text-[15px] font-medium">{title}</TruncatedText>
         <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground"><Music className="size-3.5" aria-hidden="true" />{detail}</p>
       </div>
     </div>

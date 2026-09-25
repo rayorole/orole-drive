@@ -11,6 +11,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Toggle } from "@/components/ui/toggle";
 import { Spinner } from "@/components/spinner";
+import { Hint } from "@/components/hint";
 
 export function TextPreview({ url, name, size, onReload, isReloading = false, className }: {
   url: string;
@@ -66,8 +67,8 @@ export function TextPreview({ url, name, size, onReload, isReloading = false, cl
       <span className="text-xs text-muted-foreground">{encoding}</span>
       {highlighted.isFetching && <Spinner size={12} label="Applying syntax colors" />}
       <div className="ml-auto flex items-center gap-1">
-        <Toggle size="sm" pressed={wrap} onPressedChange={setWrap} aria-label="Wrap long lines" title="Wrap long lines"><TextWrap /></Toggle>
-        <Button variant="ghost" size="icon-sm" onClick={copyText} disabled={!text} aria-label={copied ? "Copied" : "Copy text"} title={truncated ? "Copy the previewed text" : "Copy text"}>{copied ? <Check /> : <Copy />}</Button>
+        <Hint label="Wrap long lines"><Toggle size="sm" pressed={wrap} onPressedChange={setWrap} aria-label="Wrap long lines"><TextWrap /></Toggle></Hint>
+        <Hint label={copied ? "Copied" : truncated ? "Copy the previewed text" : "Copy text"}><Button variant="ghost" size="icon-sm" onClick={copyText} disabled={!text} aria-label={copied ? "Copied" : "Copy text"}>{copied ? <Check /> : <Copy />}</Button></Hint>
       </div>
     </div>
     {truncated && <p className="border-b border-border/70 bg-muted/60 px-4 py-2 text-xs text-muted-foreground">Showing the first 512 KiB. Download the file to read the rest.</p>}

@@ -37,6 +37,9 @@
   --color-primary: var(--primary);
   --color-popover-foreground: var(--foreground);
   --color-popover: var(--popover);
+  /* Cubby tooltip surface (level 2) and chrome variant, mapped onto this theme. */
+  --color-surface-2: var(--surface-2);
+  --color-chrome: var(--chrome);
   --color-card-foreground: var(--foreground);
   --color-card: var(--card);
   --radius-sm: calc(var(--radius) * .6);
@@ -85,6 +88,9 @@
   --tt-bg: var(--popover);
   --tt-fg: var(--foreground);
   --press-spring: linear(0, .11 6%, .35 11%, .64 17%, .90 22%, 1.08 28%, 1.19 33%, 1.22 39%, 1.17 47%, 1.08 56%, 1 64%, .96 72%, .95 78%, .97 89%, 1);
+  --surface-2: var(--popover);
+  --surface-shadow-combined-2: 0 0 0 1px oklch(0 0 0 / 0.06), 0 1px 1px -0.5px oklch(0 0 0 / 0.06), 0 0 transparent;
+  --chrome: #191a1c;
 }
 
 .dark {
@@ -106,6 +112,8 @@
   --ring: #89bdfc;
   --sidebar: #191a1c;
   --surface-shadow: 0 4px 12px rgb(0 0 0 / .4);
+  --surface-shadow-combined-2: 0 1px 1px -0.5px oklch(0 0 0 / 0.18), inset 0 1px 0 0 oklch(1 0 0 / 0.01), inset 0 0 0 1px oklch(1 0 0 / 0.06);
+  --chrome: #111214;
 }
 
 @layer base {

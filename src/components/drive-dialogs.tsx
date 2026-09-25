@@ -22,6 +22,7 @@ import { TextPreview } from "@/components/text-preview";
 import { ShareQr } from "@/components/share-qr";
 import { ScanStatusLine } from "@/components/file-scan-badge";
 import { useFolderAccess } from "@/components/folder-access";
+import { Hint, TruncatedText } from "@/components/hint";
 
 export function useDriveDownload() {
   const { run } = useFolderAccess();
@@ -113,7 +114,7 @@ export function DriveShareDialog({ item, onClose }: { item: DriveItem; onClose: 
     <DialogContent className="gap-5 sm:max-w-md" showCloseButton={!mutation.isPending}>
       <DialogHeader>
         <DialogTitle>Share file</DialogTitle>
-        <DialogDescription className="truncate" title={item.name}>{item.name}</DialogDescription>
+        <DialogDescription render={<TruncatedText as="p">{item.name}</TruncatedText>} />
       </DialogHeader>
       <div className="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 p-3">
         <span className={cn("flex size-9 shrink-0 items-center justify-center rounded-lg", url ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground")}>{url ? <Globe2 className="size-4" /> : <LockKeyhole className="size-4" />}</span>
@@ -137,7 +138,7 @@ export function DriveShareDialog({ item, onClose }: { item: DriveItem; onClose: 
       {mutation.error && <p role="alert" className="text-sm text-destructive">{mutation.error.message}</p>}
       <DialogFooter className="sm:justify-between">
         {url
-          ? <Button variant="destructive" disabled={mutation.isPending} onClick={() => mutation.mutate(false)} title="Stops new visits immediately. Copies already downloaded can’t be recalled.">{mutation.isPending ? <Spinner /> : <Link2Off data-icon="inline-start" />}Revoke link</Button>
+          ? <Hint label="Stops new visits immediately. Copies already downloaded can’t be recalled."><Button variant="destructive" disabled={mutation.isPending} onClick={() => mutation.mutate(false)}>{mutation.isPending ? <Spinner /> : <Link2Off data-icon="inline-start" />}Revoke link</Button></Hint>
           : <Button disabled={mutation.isPending || item.isProtected} onClick={() => mutation.mutate(true)}>{mutation.isPending ? <Spinner /> : <Link2 data-icon="inline-start" />}Create public link</Button>}
         <Button variant="outline" onClick={onClose} disabled={mutation.isPending}>Done</Button>
       </DialogFooter>
@@ -176,7 +177,7 @@ export function DrivePreviewDialog({ item, onClose }: { item: DriveItem; onClose
   return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
     <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-3xl">
       <DialogHeader className="pr-7">
-        <DialogTitle className="truncate" title={item.name}>{item.name}</DialogTitle>
+        <Hint label={item.name}><DialogTitle className="truncate">{item.name}</DialogTitle></Hint>
         <DialogDescription>{fileType(item)} · {formatBytes(item.size)}</DialogDescription>
       </DialogHeader>
       <div className="flex min-h-64 items-center justify-center overflow-hidden rounded-xl bg-muted/50">

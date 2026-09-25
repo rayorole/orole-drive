@@ -2,7 +2,7 @@
 
 import { z } from "zod";
 import { driveAction } from "@/lib/drive-access";
-import { recordDriveOpened, setDriveFolderColor, setDriveItemDescription, setDriveItemTags, toggleDriveFavorite } from "@/lib/drive-metadata";
+import { recordDriveOpened, setDriveFavorites, setDriveFolderColor, setDriveItemDescription, setDriveItemTags, toggleDriveFavorite } from "@/lib/drive-metadata";
 import { FOLDER_COLORS } from "@/lib/drive-types";
 import type { ActionResult } from "@/lib/drive-types";
 
@@ -13,6 +13,12 @@ const colorSchema = z.enum(FOLDER_COLORS).nullable();
 
 export async function toggleFavorite(id: string): Promise<ActionResult<{ favorited: boolean }>> {
   return driveAction((ctx) => toggleDriveFavorite(ctx, idSchema.parse(id)));
+}
+
+const idsSchema = z.array(idSchema).min(1, "Choose at least one file or folder.").max(1000, "Choose up to 1,000 items at a time.").transform((ids) => [...new Set(ids)]);
+
+export async function setFavorites(ids: string[], favorited: boolean): Promise<ActionResult<void>> {
+  return driveAction((ctx) => setDriveFavorites(ctx, idsSchema.parse(ids), z.boolean().parse(favorited)));
 }
 
 export async function recordOpened(id: string): Promise<ActionResult<void>> {

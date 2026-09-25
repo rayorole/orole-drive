@@ -1,8 +1,8 @@
 import "server-only";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { DriveContext, DriveTransaction } from "@/lib/drive-access";
-import { assertItemAccess, withDriveTransaction } from "@/lib/drive-access";
+import { assertItemAccess, assertItemsAccess, withDriveTransaction } from "@/lib/drive-access";
 import { DriveError } from "@/lib/drive-errors";
 import { driveActivity, driveFavorites, driveItems } from "@/lib/drive-schema";
 import type { DriveRow } from "@/lib/drive-schema";
@@ -38,6 +38,17 @@ export async function toggleDriveFavorite(ctx: DriveContext, id: string): Promis
     }
     await tx.insert(driveFavorites).values({ userId: ctx.userId, itemId: row.id }).onConflictDoNothing();
     return { favorited: true };
+  });
+}
+
+/** Sets (not toggles) favorites, so a mixed selection ends up in one consistent state. */
+export async function setDriveFavorites(ctx: DriveContext, ids: string[], favorited: boolean): Promise<void> {
+  await withDriveTransaction("write", async (tx) => {
+    const rows = await tx.select().from(driveItems).where(and(inArray(driveItems.id, ids), eq(driveItems.state, "complete")));
+    if (rows.length !== ids.length) throw new DriveError("Some of these files or folders are no longer available.");
+    await assertItemsAccess(tx, ctx, rows, { allowTrashed: true });
+    if (favorited) await tx.insert(driveFavorites).values(ids.map((itemId) => ({ userId: ctx.userId, itemId }))).onConflictDoNothing();
+    else await tx.delete(driveFavorites).where(and(eq(driveFavorites.userId, ctx.userId), inArray(driveFavorites.itemId, ids)));
   });
 }
 

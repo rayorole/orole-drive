@@ -14,6 +14,7 @@ import { Spinner } from "@/components/spinner";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { TruncatedText } from "@/components/hint";
 
 type ArchiveState = {
   status: "preparing" | "working" | "complete" | "cancelled" | "error";
@@ -113,17 +114,17 @@ export function useArchiveDownload(): ArchiveDownloadHook {
       </DialogHeader>
       {isPending ? <div className="flex min-w-0 flex-col gap-3">
         <div className="flex items-center gap-2 text-sm"><Spinner label={statusText} /><span aria-hidden="true">{statusText}</span></div>
-        {state.filename && <p className="truncate text-sm font-medium" title={state.filename}>{state.filename}</p>}
+        {state.filename && <TruncatedText as="p" className="text-sm font-medium">{state.filename}</TruncatedText>}
         {progress && <>
           <progress aria-label="Archive download progress" max={1} value={fraction ?? undefined} className="h-2 w-full accent-primary" />
           <div className="flex flex-wrap justify-between gap-1 text-xs tabular-nums text-muted-foreground">
             <span>{progress.completedFiles} of {progress.totalFiles} files</span>
             <span>{formatBytes(progress.downloadedBytes)} of {formatBytes(progress.totalBytes)}</span>
           </div>
-          {progress.currentPath && <p className="truncate text-xs text-muted-foreground" title={progress.currentPath}>{progress.currentPath}</p>}
+          {progress.currentPath && <TruncatedText as="p" className="text-xs text-muted-foreground">{progress.currentPath}</TruncatedText>}
         </>}
       </div> : state.status === "error" ? <Alert variant="destructive"><TriangleAlert /><AlertTitle>Could not finish the archive</AlertTitle><AlertDescription>{state.error}</AlertDescription></Alert>
-        : <div className="flex min-w-0 items-center gap-2 text-sm">{state.status === "complete" ? <Check className="size-4 shrink-0" aria-hidden="true" /> : <Archive className="size-4 shrink-0" aria-hidden="true" />}<span className="truncate" title={state.filename}>{state.filename || "No archive was saved."}</span></div>}
+        : <div className="flex min-w-0 items-center gap-2 text-sm">{state.status === "complete" ? <Check className="size-4 shrink-0" aria-hidden="true" /> : <Archive className="size-4 shrink-0" aria-hidden="true" />}<TruncatedText>{state.filename || "No archive was saved."}</TruncatedText></div>}
       <DialogFooter>
         {isPending ? <Button variant="outline" onClick={() => active.current?.abort(new DOMException("Download cancelled", "AbortError"))}>Cancel download</Button> : <>
           <Button variant="outline" onClick={() => setState(null)}>Close</Button>

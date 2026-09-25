@@ -10,11 +10,12 @@ import { z } from "zod";
 import { assertItemAccess, assertItemsAccess, canAccessPublic, driveAction, getItemAccess, getItemsAccess, visibleItemsCondition, withDriveTransaction } from "@/lib/drive-access";
 import { DriveError } from "@/lib/drive-errors";
 import { driveActivity, driveFavorites, driveItems } from "@/lib/drive-schema";
-import { assertMoveDepth, folderPath, loadTree, MAX_FOLDER_DEPTH, selectedRows } from "@/lib/drive-tree";
+import { assertMoveDepth, childFirst, folderPath, loadTree, MAX_FOLDER_DEPTH, selectedRows } from "@/lib/drive-tree";
 import { MAX_UPLOAD_BYTES, MULTIPART_THRESHOLD_BYTES } from "@/lib/drive-types";
-import { abortMultipartUpload, commitUpload, createMultipartUpload, createObjectKey, createPublicToken, publicShareUrl, removeObject, removeStagedObject, signDownload, signUpload, toDriveItem } from "@/lib/storage";
+import { abortMultipartUpload, commitUpload, copyFileObject, createMultipartUpload, createObjectKey, createPublicToken, publicShareUrl, removeObject, removeStagedObject, signDownload, signUpload, toDriveItem } from "@/lib/storage";
 import { permanentlyDeleteDriveItems, restoreDriveItems, trashDriveItems } from "@/lib/trash";
 import { queueScanSubmission } from "@/lib/virus-scan-jobs";
+import { copyName } from "@/lib/copy-name";
 import { driveVirusScans } from "@/lib/virustotal-schema";
 
 const idSchema = z.uuid("Choose a valid file or folder.");
@@ -244,6 +245,79 @@ export async function moveItems(input: { ids: string[]; parentId: string | null 
       }
       await tx.update(driveItems).set({ parentId, updatedAt: new Date() }).where(inArray(driveItems.id, tree.roots.map((row) => row.id)));
     });
+  });
+}
+
+const MAX_COPY_ITEMS = 2_000;
+
+/**
+ * Copies files and folders (with everything inside) into a folder. R2 duplicates the bytes server-side
+ * before any row exists, so a failure part-way leaves nothing behind: copied objects are removed and
+ * no row is written. Public links, favorites and scan results are not copied.
+ */
+export async function copyItems(input: { ids: string[]; parentId: string | null }): Promise<ActionResult<{ copied: number }>> {
+  return driveAction(async (ctx) => {
+    const { ids, parentId } = z.object({ ids: idsSchema, parentId: parentSchema }).parse(input);
+    const plan = await withDriveTransaction("read", async (tx) => {
+      const selected = await selectedRows(tx, ids);
+      if (selected.some((row) => row.state !== "complete" || row.trashedAt)) throw new DriveError("Only available files and folders can be copied.");
+      const tree = await loadTree(tx, ids);
+      await assertItemsAccess(tx, ctx, tree.rows, { allowTrashed: true });
+      const path = await destination(tx, ctx, parentId);
+      if (path.some((folder) => tree.byId.has(folder.id))) throw new DriveError("A folder can’t be copied into itself or one of its subfolders.");
+      assertMoveDepth(tree, path);
+      const siblings = await tx.select({ name: driveItems.name }).from(driveItems)
+        .where(and(parentId ? eq(driveItems.parentId, parentId) : isNull(driveItems.parentId), isNull(driveItems.trashedAt)));
+      return { tree, taken: new Set(siblings.map((row) => row.name)) };
+    });
+
+    // Parents before children; skip anything trashed or unfinished, and everything under it.
+    const roots = new Set(plan.tree.roots.map((row) => row.id));
+    const newIds = new Map<string, string>();
+    const rows: { source: DriveRow; copy: typeof driveItems.$inferInsert }[] = [];
+    for (const source of childFirst(plan.tree.rows).reverse()) {
+      const isRoot = roots.has(source.id);
+      if (source.state !== "complete" || source.trashedAt || (!isRoot && !newIds.has(source.parentId ?? ""))) continue;
+      const id = randomUUID();
+      newIds.set(source.id, id);
+      const name = isRoot ? copyName(source.name, source.kind, plan.taken) : source.name;
+      if (isRoot) plan.taken.add(name);
+      rows.push({
+        source,
+        copy: {
+          id, name, kind: source.kind, parentId: isRoot ? parentId : newIds.get(source.parentId!)!,
+          description: source.description, tags: source.tags, folderColor: source.folderColor, state: "complete",
+          ...(source.kind === "file"
+            ? { size: source.size, mimeType: source.mimeType, objectKey: createObjectKey(id) }
+            // A copied protected folder stays protected, under a fresh version so earlier unlocks don't carry over.
+            : { passwordHash: source.passwordHash, passwordVersion: source.passwordHash ? randomUUID() : null }),
+        },
+      });
+    }
+    if (rows.length > MAX_COPY_ITEMS) throw new DriveError(`Copies are limited to ${MAX_COPY_ITEMS.toLocaleString("en")} items at a time.`);
+
+    const files = rows.filter(({ source }) => source.kind === "file");
+    const copied: DriveRow[] = [];
+    try {
+      for (let index = 0; index < files.length; index += 4) {
+        await Promise.all(files.slice(index, index + 4).map(async (file) => {
+          const target = { ...file.source, ...file.copy, etag: null } as DriveRow;
+          file.copy.etag = await copyFileObject(file.source, target);
+          copied.push(target);
+        }));
+      }
+      await withDriveTransaction("write", async (tx) => {
+        await destination(tx, ctx, parentId);
+        for (let index = 0; index < rows.length; index += 500) {
+          await tx.insert(driveItems).values(rows.slice(index, index + 500).map((row) => row.copy));
+        }
+      });
+    } catch (error) {
+      await Promise.allSettled(copied.map((target) => removeObject(target)));
+      if (error instanceof DriveError) throw error;
+      throw new DriveError("The copy couldn’t be completed. Nothing was changed.");
+    }
+    return { copied: plan.tree.roots.length };
   });
 }
 

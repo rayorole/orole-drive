@@ -4,9 +4,10 @@ import { useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
 import { MotionConfig } from "motion/react";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { TooltipProvider } from "@/components/ui/cubby-ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { SoundEffects } from "@/components/ui/sound";
+import { ConnectionStatus } from "@/components/connection-status";
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(() => new QueryClient({
@@ -16,7 +17,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
       <MotionConfig reducedMotion="user">
         <QueryClientProvider client={queryClient}>
-          <SoundEffects><TooltipProvider>{children}<Toaster closeButton /></TooltipProvider></SoundEffects>
+          <SoundEffects><TooltipProvider>{children}<Toaster closeButton /><ConnectionStatus /></TooltipProvider></SoundEffects>
         </QueryClientProvider>
       </MotionConfig>
     </ThemeProvider>
