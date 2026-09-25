@@ -3,6 +3,12 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   poweredByHeader: false,
   serverExternalPackages: ["pdfjs-dist"],
+  outputFileTracingIncludes: {
+    "/api/mcp": [
+      "./public/pdf-assets/standard_fonts/**/*",
+      "./node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs",
+    ],
+  },
   experimental: {
     // HMR otherwise caches even no-store file streams in development.
     serverComponentsHmrCache: false,

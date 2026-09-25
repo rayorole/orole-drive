@@ -1,14 +1,13 @@
 import "server-only";
 
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 export const MCP_PDF_MAX_BYTES = 5 * 1_048_576;
 const PDF_MAX_PAGES = 20;
 const PDF_MAX_CHARACTERS = 64_000;
-const standardFontDataUrl = join(dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json")), "standard_fonts").replaceAll("\\", "/") + "/";
+const standardFontDataUrl = join(process.cwd(), "public", "pdf-assets", "standard_fonts").replaceAll("\\", "/") + "/";
 
 /** Bound the actual storage response as well as the drive's recorded file size. */
 export async function downloadMcpBytes(url: string, maxBytes: number): Promise<Uint8Array> {
