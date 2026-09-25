@@ -55,10 +55,12 @@ async function ensureScan(tx: DriveTransaction, row: DriveRow): Promise<DriveVir
       ? await getAnalysisReport(existing.analysisId, existing.sha256)
       : await getFileReportByHash(existing.sha256);
     if (!report) return existing;
+    // Postgres keeps microseconds but a JS Date only milliseconds, so compare at the precision we read back.
+    // Exact equality never matched rows written by clock_timestamp(), which left scans stuck on "Scanning…".
     const [updated] = await tx.update(driveVirusScans).set({
       status: report.status, statsJson: report.statsJson, permalink: report.permalink,
       analysisId: report.status === "pending" ? existing.analysisId : null, scannedAt: new Date(),
-    }).where(and(eq(driveVirusScans.itemId, row.id), eq(driveVirusScans.scannedAt, existing.scannedAt))).returning();
+    }).where(and(eq(driveVirusScans.itemId, row.id), sql`date_trunc('milliseconds', ${driveVirusScans.scannedAt}) = ${existing.scannedAt.toISOString()}::timestamptz`)).returning();
     return updated ?? existing;
   }
   if (!Number.isSafeInteger(row.size) || row.size < 0 || row.size > MAX_AUTO_HASH_BYTES) return null;
