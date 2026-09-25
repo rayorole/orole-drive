@@ -37,6 +37,8 @@ export type DriveItem = {
   hasPassword: boolean;
   isLocked: boolean;
   isProtected: boolean;
+  /** Folders only: excluded from AI search by its owner (descendants inherit this). */
+  searchExcluded: boolean;
   tags: string[];
   description: string;
   folderColor: string | null;
@@ -46,6 +48,11 @@ export type DriveItem = {
   scanStatus?: DriveScanStatus;
   /** Files that look worth scanning (for example `invoice.pdf.exe`) and have no scan result yet. */
   scanSuggestion?: { level: "medium" | "high"; reasons: string[] };
+};
+/** A file's place in the AI search index; null from the server when search is not configured. */
+export type SearchIndexStatus = {
+  state: "queued" | "indexing" | "indexed" | "skipped" | "failed" | "not_indexed";
+  skipReason: "too_large" | "unsupported" | "excluded" | "protected" | "empty" | "trashed" | null;
 };
 export type DriveScanStatus = "scanning" | "clean" | "suspicious" | "malicious";
 export const FOLDER_COLORS = ["blue", "green", "amber", "red", "violet", "gray"] as const;

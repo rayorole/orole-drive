@@ -65,6 +65,11 @@ const actionGroups: {
     label: "Folder passwords",
     actions: ["protect", "unprotect"],
   },
+  {
+    value: "search",
+    label: "AI search",
+    actions: ["exclude_search", "include_search"],
+  },
 ];
 
 const relative = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
@@ -293,6 +298,12 @@ function ActivitySentence({
       break;
     case "unprotect":
       sentence = <>removed the password from {name}</>;
+      break;
+    case "exclude_search":
+      sentence = <>excluded {name} from AI search</>;
+      break;
+    case "include_search":
+      sentence = <>included {name} in AI search again</>;
       break;
   }
   return (

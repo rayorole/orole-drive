@@ -31,6 +31,7 @@ import { conflictResolutionsSchema, destinationSiblings } from "@/lib/name-confl
 import { planTransfer } from "@/lib/transfer-plan";
 import { idSchema, mimeSchema, nameSchema, parentSchema, uploadKeySchema, uploadResolutionSchema } from "@/lib/drive-input";
 import { cancelPendingUpload, finishUpload, startUpload } from "@/lib/uploads";
+import { enqueueSearch, enqueueSearchTree, removeFromSearch } from "@/lib/search-index";
 
 /** Files assessed per listing in the background, so older files get risk scores without a batch job. */
 const RISK_BACKFILL_PER_LISTING = 10;
@@ -209,6 +210,8 @@ export async function renameItem(input: { id: string; name: string }): Promise<A
       const row = await requireItem(tx, ctx, id, "write");
       await tx.update(driveItems).set({ name, updatedAt: new Date() }).where(eq(driveItems.id, id));
       if (row.name !== name) await recordEvents(tx, ctx, [{ action: "rename", item: { id, name, kind: row.kind, parentId: row.parentId }, details: { fromName: row.name } }]);
+      // A file's name leads its first passage; folder names are never embedded.
+      if (row.name !== name && row.kind === "file") await enqueueSearch(tx, [id]);
     });
   });
 }
@@ -243,11 +246,16 @@ export async function moveItems(input: { ids: string[]; parentId: string | null;
       if (path.some((folder) => Boolean(folder.passwordHash))) {
         await tx.update(driveItems).set({ publicToken: null, publicExpiresAt: null, sharedByEmail: null }).where(inArray(driveItems.id, tree.rows.map((row) => row.id)));
       }
+      // Landing under a protected or excluded folder drops the passages now; leaving one brings them back.
+      const hidden = path.some((folder) => folder.passwordHash) ? "protected" : path.some((folder) => folder.searchExcluded) ? "excluded" : null;
+      if (hidden) await removeFromSearch(tx, plan.items.map(({ root }) => root.id), hidden);
+      else await enqueueSearchTree(tx, plan.items.map(({ root }) => root.id));
       const now = new Date();
       const keepingName = plan.items.filter(({ root, name }) => name === root.name).map(({ root }) => root.id);
       if (keepingName.length) await tx.update(driveItems).set({ parentId, updatedAt: now }).where(inArray(driveItems.id, keepingName));
       const renamed = plan.items.filter(({ root, name }) => name !== root.name);
       for (const { root, name } of renamed) await tx.update(driveItems).set({ parentId, name, updatedAt: now }).where(eq(driveItems.id, root.id));
+      if (!hidden) await enqueueSearch(tx, renamed.filter(({ root }) => root.kind === "file").map(({ root }) => root.id));
       const fromIds = [...new Set(plan.items.flatMap(({ root }) => root.parentId ?? []))];
       const fromNames = new Map(fromIds.length ? (await tx.select({ id: driveItems.id, name: driveItems.name }).from(driveItems)
         .where(and(inArray(driveItems.id, fromIds), visibleItemsCondition(ctx)))).map((row) => [row.id, row.name]) : []);
@@ -312,7 +320,7 @@ export async function copyItems(input: { ids: string[]; parentId: string | null;
           ...(source.kind === "file"
             ? { size: source.size, mimeType: source.mimeType, objectKey: createObjectKey(id) }
             // A copied protected folder stays protected, under a fresh version so earlier unlocks don't carry over.
-            : { passwordHash: source.passwordHash, passwordVersion: source.passwordHash ? randomUUID() : null }),
+            : { passwordHash: source.passwordHash, passwordVersion: source.passwordHash ? randomUUID() : null, searchExcluded: source.searchExcluded }),
         },
       });
     }
@@ -354,6 +362,7 @@ export async function copyItems(input: { ids: string[]; parentId: string | null;
         for (let index = 0; index < rows.length; index += 500) {
           await tx.insert(driveItems).values(rows.slice(index, index + 500).map((row) => row.copy));
         }
+        await enqueueSearch(tx, rows.filter(({ source }) => source.kind === "file").map(({ copy }) => copy.id!));
         await recordEvents(tx, ctx, rows.filter(({ source }) => finalNames.has(source.id)).map(({ source, copy }) => ({
           action: "copy", item: { id: copy.id!, name: copy.name, kind: copy.kind, parentId }, details: { sourceId: source.id },
         })));

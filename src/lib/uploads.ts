@@ -19,6 +19,7 @@ import { destinationSiblings, findConflicts, type DestinationSibling } from "@/l
 import { assertQuota } from "@/lib/quota";
 import { cleanupUpload, commitUpload, createMultipartUpload, createObjectKey, ensureUploadWork, listUploadedParts, referencedObjectKeys, removeStagedObject, signUpload, toDriveItem } from "@/lib/storage";
 import { getDb } from "@/lib/db";
+import { enqueueSearch } from "@/lib/search-index";
 import { withStorageObjectLock } from "@/lib/storage-work";
 import { cancelTrashedUploads, trashRows } from "@/lib/trash";
 
@@ -217,6 +218,7 @@ export async function finishUpload(ctx: DriveContext, id: string): Promise<Drive
         completed = replaced.file;
       } else {
         [completed] = await tx.update(driveItems).set({ objectKey: publicationKey, state: "complete", etag, updatedAt: new Date() }).where(eq(driveItems.id, id)).returning();
+        await enqueueSearch(tx, [completed.id]);
       }
       await tx.update(driveUploadWork).set({ status: "published" }).where(eq(driveUploadWork.id, id));
       await tx.insert(driveActivity).values({ userId: ctx.userId, itemId: completed.id, accessedAt: new Date() })

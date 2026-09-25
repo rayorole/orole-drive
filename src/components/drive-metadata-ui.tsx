@@ -21,6 +21,8 @@ import { useFolderAccess } from "@/components/folder-access";
 import { FileScanBadge } from "@/components/file-scan-badge";
 import { ItemActivity } from "@/components/drive-activity";
 import { FolderEmojiPicker } from "@/components/folder-emoji-picker";
+import { useSearchAvailability } from "@/components/search-availability";
+import { SearchStatusLine } from "@/components/search-status";
 
 const colorSwatchClass: Record<string, string> = {
   blue: "bg-blue-500", green: "bg-green-500", amber: "bg-amber-500",
@@ -31,6 +33,7 @@ export function DriveMetadataDialog({ item, onClose }: { item: DriveItem; onClos
   const queryClient = useQueryClient();
   const { run } = useFolderAccess();
   const editable = canEditItem(item);
+  const { search: searchEnabled } = useSearchAvailability();
   const [favorite, setFavorite] = useState(item.isFavorite);
   const [tags, setTags] = useState<string[]>(item.tags);
   const [tagInput, setTagInput] = useState("");
@@ -93,6 +96,14 @@ export function DriveMetadataDialog({ item, onClose }: { item: DriveItem; onClos
         {item.kind === "file" && <Field>
           <FieldLabel>VirusTotal</FieldLabel>
           <FileScanBadge itemId={item.id} size={item.size} canManage={canManageItem(item)} />
+        </Field>}
+        {searchEnabled && item.kind === "file" && <Field>
+          <FieldLabel>AI search</FieldLabel>
+          <SearchStatusLine itemId={item.id} />
+        </Field>}
+        {searchEnabled && item.kind === "folder" && item.searchExcluded && <Field>
+          <FieldLabel>AI search</FieldLabel>
+          <p className="text-sm">Excluded, with everything inside</p>
         </Field>}
         <Field orientation="horizontal">
           <Button type="button" variant="outline" size="sm" disabled={favoriteMutation.isPending} onClick={() => favoriteMutation.mutate()}>

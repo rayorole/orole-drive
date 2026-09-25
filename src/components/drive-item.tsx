@@ -37,6 +37,8 @@ import {
   RotateCcw,
   ShieldAlert,
   ShieldCheck,
+  SearchX,
+  Sparkles,
   Star,
   StarOff,
   Trash2,
@@ -54,6 +56,7 @@ import { ScanningIndicator } from "@/components/file-scan-badge";
 import { useDriveItemDnd } from "@/components/drive-drag";
 import { Hint, TruncatedText } from "@/components/hint";
 import { usePinnedFolders } from "@/components/pinned-folders";
+import { useSearchAvailability } from "@/components/search-availability";
 import { FolderIcon } from "@/components/folder-icon";
 import { profileAvatarUrl } from "@/lib/profile-avatar";
 import {
@@ -152,7 +155,8 @@ export type DriveItemAction =
   | "pin"
   | "unpin"
   | "cut"
-  | "copy";
+  | "copy"
+  | "search-exclude";
 type ItemActionHandler = (action: DriveItemAction, items: DriveItem[]) => void;
 type MenuEntry = {
   action: DriveItemAction;
@@ -174,7 +178,7 @@ export function canPerformItemAction(
   items: DriveItem[],
 ) {
   if (!items.length) return false;
-  if (action === "password" || action === "scan")
+  if (action === "password" || action === "scan" || action === "search-exclude")
     return items.every(canManageItem);
   if (
     [
@@ -252,6 +256,7 @@ function itemMenu(
   trash: boolean,
   pinnedIds: ReadonlySet<string>,
   pinsUnavailable: boolean,
+  searchEnabled: boolean,
 ): MenuNode[][] {
   const single = items.length === 1 ? items[0] : null;
   if (trash)
@@ -383,6 +388,17 @@ function itemMenu(
                   },
                 ]
               : []),
+            ...(searchEnabled
+              ? [
+                  {
+                    action: "search-exclude" as const,
+                    label: folder.searchExcluded
+                      ? "Include in AI search"
+                      : "Exclude from AI search",
+                    icon: folder.searchExcluded ? Sparkles : SearchX,
+                  },
+                ]
+              : []),
           ])
         : []),
     ],
@@ -426,6 +442,7 @@ function ItemMenu({
   onAction: ItemActionHandler;
 }) {
   const pins = usePinnedFolders();
+  const { search: searchEnabled } = useSearchAvailability();
   const entry = ({
     action,
     label,
@@ -467,6 +484,7 @@ function ItemMenu({
           trash,
           pins.ids,
           pins.query.isPending || pins.query.isError || pins.mutation.isPending,
+          searchEnabled,
         ).map((section, index) => (
           <Fragment key={index}>
             {index > 0 && <DropdownMenuSeparator />}
@@ -510,6 +528,7 @@ function ItemContext({
   onAction: ItemActionHandler;
 }) {
   const pins = usePinnedFolders();
+  const { search: searchEnabled } = useSearchAvailability();
   const entry = ({
     action,
     label,
@@ -547,6 +566,7 @@ function ItemContext({
           trash,
           pins.ids,
           pins.query.isPending || pins.query.isError || pins.mutation.isPending,
+          searchEnabled,
         ).map((section, index) => (
           <Fragment key={index}>
             {index > 0 && <ContextMenuSeparator />}

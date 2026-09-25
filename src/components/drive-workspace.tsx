@@ -50,6 +50,8 @@ import {
   restoreItems,
 } from "@/app/actions/drive";
 import { lockFolder } from "@/app/actions/folder-security";
+import { setSearchExcluded } from "@/app/actions/search";
+import { SearchAvailabilityProvider, type SearchAvailability } from "@/components/search-availability";
 import { recordOpened, setFavorites } from "@/app/actions/drive-metadata";
 import { listDrive, currentDriveAccessGeneration, assertDriveAccessGeneration, cancelDriveReads } from "@/lib/drive-read-client";
 import type {
@@ -520,7 +522,7 @@ function DriveSidebar({
   );
 }
 
-export function DriveWorkspace({ user }: { user: FamilyUser }) {
+export function DriveWorkspace({ user, search }: { user: FamilyUser; search: SearchAvailability }) {
   const client = useQueryClient();
   useEffect(() => () => {
     // The root provider survives login navigation; private results must not survive this session's workspace.
@@ -528,15 +530,17 @@ export function DriveWorkspace({ user }: { user: FamilyUser }) {
     client.clear();
   }, [client]);
   return (
-    <FolderAccessProvider>
-      <PinnedFoldersProvider>
-        <NameConflictProvider>
-          <DriveUndoProvider>
-            <DriveWorkspaceContent user={user} />
-          </DriveUndoProvider>
-        </NameConflictProvider>
-      </PinnedFoldersProvider>
-    </FolderAccessProvider>
+    <SearchAvailabilityProvider value={search}>
+      <FolderAccessProvider>
+        <PinnedFoldersProvider>
+          <NameConflictProvider>
+            <DriveUndoProvider>
+              <DriveWorkspaceContent user={user} />
+            </DriveUndoProvider>
+          </NameConflictProvider>
+        </PinnedFoldersProvider>
+      </FolderAccessProvider>
+    </SearchAvailabilityProvider>
   );
 }
 
@@ -872,6 +876,24 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
     },
     onError: (error) => toast.error(error.message),
   });
+  const searchExclusion = useMutation({
+    mutationFn: (input: { id: string; excluded: boolean }) =>
+      run(() => setSearchExcluded(input)),
+    onSuccess: (_result, { excluded }) => {
+      // Passages from the folder may sit in cached results; they are already gone from the index.
+      client.removeQueries({ queryKey: ["semantic-search"] });
+      toast.success(
+        excluded
+          ? "Excluded from AI search"
+          : "Included in AI search. Files are indexed in the background.",
+      );
+    },
+    onError: (error) => toast.error(error.message),
+    onSettled: (_result, _error, { id }) => {
+      invalidateDriveMetadata(client, [id]);
+      void client.invalidateQueries({ queryKey: ["search-status"] });
+    },
+  });
   const favorite = useMutation({
     mutationFn: ({ ids, favorited }: { ids: string[]; favorited: boolean }) =>
       run(() => setFavorites(ids, favorited)),
@@ -1065,6 +1087,8 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
     } else if (action === "restore")
       restore.mutate(targets.map((target) => target.id));
     else if (action === "lock") lock.mutate(item.id);
+    else if (action === "search-exclude")
+      searchExclusion.mutate({ id: item.id, excluded: !item.searchExcluded });
     else if (action === "favorite" || action === "unfavorite")
       favorite.mutate({
         ids: targets.map((target) => target.id),

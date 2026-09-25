@@ -95,6 +95,7 @@ export function toDriveItem(row: DriveRow): DriveItem {
     hasPassword: Boolean(row.passwordHash),
     isLocked: Boolean(row.passwordHash),
     isProtected: Boolean(row.passwordHash),
+    searchExcluded: row.searchExcluded,
     tags: row.tags,
     description: row.description,
     folderColor: row.folderColor,

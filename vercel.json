@@ -5,6 +5,10 @@
     {
       "path": "/api/cron/trash",
       "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/cron/search-index",
+      "schedule": "0 4 * * *"
     }
   ]
 }

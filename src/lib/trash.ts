@@ -12,6 +12,7 @@ import { childFirst, folderPath, loadTree, restoreRows, selectedRows } from "@/l
 import { cleanupUpload, ensureUploadWork, pruneExpiredUploads, removeObject, removeVersionObject } from "@/lib/storage";
 import { withStorageObjectLock } from "@/lib/storage-work";
 import { recordEvents, SYSTEM_ACTOR, type DriveEventDetails } from "@/lib/activity";
+import { enqueueSearchTree, removeFromSearch } from "@/lib/search-index";
 
 async function removeRows(ids: string[]): Promise<void> {
   const plan = await withDriveTransaction("write", async (tx) => {
@@ -64,6 +65,7 @@ export async function trashRows(tx: DriveTransaction, ctx: DriveContext, ids: st
     await tx.update(driveItems).set({ trashedAt: now, trashRootId, updatedAt: now }).where(inArray(driveItems.id, members));
   }
   await tx.update(driveItems).set({ publicToken: null, publicExpiresAt: null, sharedByEmail: null }).where(inArray(driveItems.id, tree.rows.map((row) => row.id)));
+  await removeFromSearch(tx, ids, "trashed");
   await recordEvents(tx, ctx, tree.roots.map((row) => ({ action: "trash", item: { id: row.id, name: row.name, kind: row.kind, parentId: row.parentId }, details })));
   return tree.rows.filter((row) => row.state === "pending").map((row) => row.id);
 }
@@ -114,6 +116,7 @@ export async function restoreDriveItems(ctx: DriveContext, ids: string[]): Promi
     }
     await tx.update(driveItems).set({ trashedAt: null, trashRootId: null, publicToken: null, publicExpiresAt: null, sharedByEmail: null, updatedAt: new Date() })
       .where(inArray(driveItems.id, rows.map((row) => row.id)));
+    await enqueueSearchTree(tx, rows.map((row) => row.id));
     await recordEvents(tx, ctx, tree.roots.filter((row) => restoring.has(row.id)).map((row) => relocated.has(row.id)
       ? { action: "restore", item: { id: row.id, name: row.name, kind: row.kind, parentId: null }, details: { restoredToRoot: true } }
       : { action: "restore", item: { id: row.id, name: row.name, kind: row.kind, parentId: row.parentId } }));
@@ -126,6 +129,8 @@ async function startDeletion(tx: DriveTransaction, rows: DriveRow[]): Promise<vo
   if (!rows.length) return;
   await tx.update(driveItems).set({ deletionStartedAt: sql`coalesce(${driveItems.deletionStartedAt}, now())`, publicToken: null, publicExpiresAt: null, sharedByEmail: null })
     .where(inArray(driveItems.id, rows.map((row) => row.id)));
+  // Normally already removed when trashed; also covers rows trashed before search existed.
+  await removeFromSearch(tx, rows.map((row) => row.id), "trashed");
 }
 
 const REMOVE_BATCH = 25;

@@ -10,6 +10,7 @@ import { DriveError } from "@/lib/drive-errors";
 import { driveFileVersions, driveItems } from "@/lib/drive-schema";
 import { prioritizeScans } from "@/lib/file-risk";
 import { cleanupVersion, queueVersionCleanup, removeThumbnail } from "@/lib/storage";
+import { enqueueSearch } from "@/lib/search-index";
 import { driveFileRisks, driveVirusScans } from "@/lib/virustotal-schema";
 
 /** Earlier versions kept per file; a replacement beyond this drops the oldest. */
@@ -38,6 +39,7 @@ export async function replaceFileContent(tx: DriveTransaction, file: DriveRow, c
   const [updated] = await tx.update(driveItems).set({ objectKey, size, mimeType, etag, createdBy, updatedAt: new Date() }).where(eq(driveItems.id, file.id)).returning();
   await tx.delete(driveVirusScans).where(eq(driveVirusScans.itemId, file.id));
   await tx.delete(driveFileRisks).where(eq(driveFileRisks.itemId, file.id));
+  await enqueueSearch(tx, [file.id]);
   const pruned = await tx.select().from(driveFileVersions).where(eq(driveFileVersions.itemId, file.id))
     .orderBy(desc(driveFileVersions.replacedAt), desc(driveFileVersions.createdAt)).offset(MAX_FILE_VERSIONS);
   if (pruned.length) {

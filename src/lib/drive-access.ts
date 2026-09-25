@@ -55,6 +55,11 @@ export function runWithDriveContext<T>(actor: DriveActor, work: () => Promise<T>
   return driveActors.run(actor, work);
 }
 
+/** Background system work (search indexing after a response) never runs as the requesting actor. */
+export function runAsSystem<T>(work: () => Promise<T>): Promise<T> {
+  return driveActors.exit(work);
+}
+
 /** For a second capability an action needs only in some cases, e.g. a move that replaces (trashes) an existing item. */
 export function assertCapability(capability: DriveCapability): void {
   const actor = driveActors.getStore();

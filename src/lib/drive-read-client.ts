@@ -64,6 +64,7 @@ export const getPublicFileScanStatus = (token: string, signal?: AbortSignal) => 
 export const getPublicAccess = (token: string, signal?: AbortSignal) => readDrive("getPublicAccess", [token], signal);
 export const getPublicFolderFileAccess = (token: string, id: string, signal?: AbortSignal) => readDrive("getPublicFolderFileAccess", [token, id], signal);
 export const getPublicFolderArchive = (token: string, id: string, signal?: AbortSignal) => readDrive("getPublicFolderArchive", [token, id], signal);
+export const getSearchStatus = (id: string, signal?: AbortSignal) => readDrive("getSearchStatus", [id], signal);
 
 type ThumbnailRequest = {
   id: string;
