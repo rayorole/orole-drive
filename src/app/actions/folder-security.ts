@@ -11,6 +11,7 @@ import { driveFolderUnlocks, driveItems } from "@/lib/drive-schema";
 import type { DriveRow } from "@/lib/drive-schema";
 import type { ActionResult } from "@/lib/drive-types";
 import { hashFolderPassword, isValidFolderPassword, verifyFolderPassword } from "@/lib/folder-password";
+import { recordEvents } from "@/lib/activity";
 
 const idSchema = z.uuid("Choose a valid folder.");
 const passwordSchema = z.string().max(1_024, "Use a password up to 1,024 bytes long.").refine(
@@ -105,6 +106,8 @@ export async function setFolderPassword(input: { id: string; password: string | 
       await tx.update(driveItems).set({ passwordHash, passwordVersion, updatedAt: new Date() }).where(eq(driveItems.id, id));
       await tx.delete(driveFolderUnlocks).where(eq(driveFolderUnlocks.folderId, id));
       if (passwordVersion) await grantFolder(tx, ctx, id, passwordVersion);
+      const item = { id, name: folder.name, kind: "folder" as const, parentId: folder.parentId };
+      await recordEvents(tx, ctx, [passwordHash === null ? { action: "unprotect", item } : { action: "protect", item, details: folder.passwordHash === null ? undefined : { passwordChanged: true } }]);
     });
   });
 }

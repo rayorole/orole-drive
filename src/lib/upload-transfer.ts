@@ -97,6 +97,10 @@ async function putBlob(
         } else if (xhr.status >= 200 && xhr.status < 300) {
           report(blob.size);
           finish();
+        } else if (xhr.status === 412 && headers?.["If-None-Match"] === "*") {
+          // An earlier attempt already stored this upload; completion verifies it matches.
+          report(blob.size);
+          finish();
         } else {
           finish(new Error(`Storage rejected the upload (${xhr.status}). Try again.`));
         }
@@ -114,7 +118,17 @@ async function putBlob(
   }
 }
 
-/** Resolves or rejects only after every active PUT and waiting worker has settled. */
+/** Bytes a resumed multipart upload already has in storage. */
+export function completedBytes(ticket: UploadTicket, size: number) {
+  if (ticket.mode === "single") return 0;
+  return ticket.completedParts.reduce((total, partNumber) => total + Math.min(ticket.partSize, size - (partNumber - 1) * ticket.partSize), 0);
+}
+
+/**
+ * Sends the ticket's parts (a resumed multipart ticket lists only the missing ones). `onProgress` reports the
+ * total bytes stored, including parts sent before. Resolves or rejects only after every active PUT and waiting
+ * worker has settled.
+ */
 export async function transferUpload(
   file: File,
   ticket: UploadTicket,
@@ -126,7 +140,8 @@ export async function transferUpload(
   signal.addEventListener("abort", abort, { once: true });
   if (signal.aborted) abort();
   let nextPart = 0;
-  let sent = 0;
+  let sent = completedBytes(ticket, file.size);
+  onProgress(sent);
   const partCount = ticket.mode === "single" ? 1 : ticket.parts.length;
   const onBytes = (delta: number) => {
     sent += delta;

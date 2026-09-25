@@ -24,6 +24,7 @@ export async function GET(request: Request) {
   try {
     // The purge is bounded to four leaf batches; committed deletion tombstones
     // survive storage failures or function timeouts for the next daily retry.
+    // It also drops activity history older than a year.
     return Response.json(await purgeExpiredTrash(), { headers });
   } catch {
     return Response.json({ error: "Scheduled cleanup failed." }, { status: 500, headers });

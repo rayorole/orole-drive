@@ -50,6 +50,13 @@
       "when": 1790299426712,
       "tag": "0006_overjoyed_rhino",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790329897801,
+      "tag": "0007_files_versions_activity",
+      "breakpoints": true
     }
   ]
 }

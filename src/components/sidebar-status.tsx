@@ -1,62 +1,102 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { PolarAngleAxis, RadialBar, RadialBarChart } from "recharts";
 import { HardDrive, Plug, TriangleAlert } from "lucide-react";
 import { getConnectedAgents } from "@/app/actions/mcp-status";
+import { getStorageUsage } from "@/app/actions/storage-usage";
+import type { StorageCategory, StorageQuota, StorageUsageReport } from "@/lib/drive-types";
 import { cn } from "@/lib/utils";
-import { formatBytes } from "@/components/drive-item";
+import { formatBytes } from "@/lib/format-bytes";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import { ChartContainer, type ChartConfig } from "@/components/ui/chart";
 import { Hint } from "@/components/hint";
 
-/** The family plan's storage allowance. formatBytes counts in 1024s, so this reads as "10 GB". */
-export const STORAGE_LIMIT_BYTES = 10 * 1024 ** 3;
+export const CATEGORY_LABELS: Record<StorageCategory, string> = {
+  image: "Images", video: "Videos", audio: "Audio", pdf: "PDFs", text: "Documents", code: "Code", archive: "Archives", other: "Other files",
+};
+export const SEGMENT_COLORS: Record<StorageCategory | "trash" | "versions" | "uploading", string> = {
+  image: "bg-sky-500", video: "bg-violet-500", audio: "bg-pink-500", pdf: "bg-red-500", text: "bg-emerald-500", code: "bg-amber-500",
+  archive: "bg-orange-700", other: "bg-slate-500", trash: "bg-stone-400", versions: "bg-indigo-300", uploading: "bg-teal-300",
+};
 
-// The fill carries severity; the unfilled track is a faint step of the same color, so the ring reads as one meter.
-function severity(ratio: number) {
-  if (ratio >= 0.95) return { color: "var(--destructive)", note: ratio >= 1 ? "Storage full" : "Almost full" };
-  if (ratio >= 0.8) return { color: "oklch(76.9% 0.188 70.08)", note: "Running low" }; // Tailwind amber-500
-  return { color: "var(--primary)", note: null };
+/** Non-empty slices of the drive's usage (file types, Trash, old versions, uploads); they add up to `usedBytes`. */
+export function usageParts(usage: StorageUsageReport) {
+  return [
+    ...usage.categories.map(({ category, bytes, files }) => ({ key: category, label: CATEGORY_LABELS[category], bytes, detail: `${files.toLocaleString()} ${files === 1 ? "file" : "files"}` })),
+    { key: "trash" as const, label: "Trash", bytes: usage.trashBytes, detail: null },
+    { key: "versions" as const, label: "Old versions", bytes: usage.versionBytes, detail: null },
+    { key: "uploading" as const, label: "Uploads in progress", bytes: usage.uploadingBytes, detail: null },
+  ].filter((part) => part.bytes > 0);
 }
 
-function UsageRing({ ratio, className }: { ratio: number; className?: string }) {
-  const { color } = severity(ratio);
-  const config = { used: { label: "Used", color } } satisfies ChartConfig;
-  return <ChartContainer config={config} aria-hidden="true"
-    className={cn("aspect-square [&_.recharts-radial-bar-background-sector]:fill-[color-mix(in_oklab,var(--color-used)_16%,transparent)]", className)}>
-    <RadialBarChart data={[{ used: Math.min(ratio, 1) * 100 }]} startAngle={90} endAngle={-270} innerRadius="72%" outerRadius="100%" barSize={6}>
-      <PolarAngleAxis type="number" domain={[0, 100]} tick={false} axisLine={false} />
-      <RadialBar dataKey="used" background cornerRadius={4} fill="var(--color-used)" isAnimationActive={false} />
-    </RadialBarChart>
-  </ChartContainer>;
+/** One colored slice per type, sized against the quota; the muted remainder is free space. */
+export function UsageBar({ usage, total, className }: { usage: StorageUsageReport; total: number; className?: string }) {
+  return <div className={cn("flex h-1.5 overflow-hidden rounded-full bg-foreground/15", className)} aria-hidden="true">
+    {usageParts(usage).map((part) => <div key={part.key} className={cn("h-full shrink-0", SEGMENT_COLORS[part.key])} style={{ width: `${(part.bytes / total) * 100}%` }} />)}
+  </div>;
 }
 
-export function StorageCard({ totalBytes, totalFiles, collapsed }: { totalBytes?: number; totalFiles?: number; collapsed: boolean }) {
-  const ratio = totalBytes === undefined ? 0 : totalBytes / STORAGE_LIMIT_BYTES;
-  const percent = Math.round(ratio * 100);
-  const summary = totalBytes === undefined ? "Storage usage unavailable" : `${formatBytes(totalBytes)} of ${formatBytes(STORAGE_LIMIT_BYTES)} used (${percent}%)`;
-  const { note } = severity(ratio);
+/** Drive usage report. Keyed under "drive" so every drive mutation's invalidation refreshes it. */
+export function useStorageUsage() {
+  return useQuery({
+    queryKey: ["drive", "storage-usage"],
+    queryFn: async () => {
+      const result = await getStorageUsage();
+      if (!result.success) throw new Error(result.error);
+      return result.data;
+    },
+    staleTime: 30_000,
+  });
+}
 
-  if (collapsed) return <Hint label={summary} side="right"><div className="flex justify-center" role="img" aria-label={summary}>
-    {totalBytes === undefined ? <HardDrive className="size-4 text-muted-foreground" /> : <UsageRing ratio={ratio} className="size-8" />}
-  </div></Hint>;
+/** Whole percent that only reads 100% once the limit is actually reached. */
+export function usagePercent(used: number, quota: number) {
+  return used >= quota ? 100 : Math.min(99, Math.round((used / quota) * 100));
+}
 
-  return <Card size="sm" className="mx-3 flex-row items-center gap-3 px-3 shadow-none" role="group" aria-label="Family storage">
-    <div className="relative size-14 shrink-0">
-      {totalBytes === undefined
-        ? <div className="flex size-full items-center justify-center rounded-full bg-muted"><HardDrive className="size-4 text-muted-foreground" /></div>
-        : <><UsageRing ratio={ratio} className="size-full" /><span className="absolute inset-0 flex items-center justify-center text-[11px] font-medium">{percent}%</span></>}
-    </div>
-    <div className="min-w-0">
-      <p className="text-xs font-medium">Family storage</p>
-      <p className="mt-0.5 text-xs text-muted-foreground">{totalBytes === undefined ? "Usage unavailable" : <>{formatBytes(totalBytes)} of {formatBytes(STORAGE_LIMIT_BYTES)}</>}</p>
-      {note
-        ? <p className="mt-0.5 flex items-center gap-1 text-[11px] font-medium text-foreground"><TriangleAlert className="size-3 shrink-0" style={{ color: severity(ratio).color }} />{note}</p>
-        : totalFiles !== undefined && <p className="mt-0.5 text-[11px] text-muted-foreground">{totalFiles.toLocaleString()} {totalFiles === 1 ? "file" : "files"}</p>}
-    </div>
-  </Card>;
+// The fill carries severity; the unfilled track is a faint step of the same color, so meters read as one piece.
+export function usageSeverity(ratio: number) {
+  if (ratio >= 1) return { color: "var(--destructive)", level: "full" as const };
+  if (ratio >= 0.9) return { color: "oklch(76.9% 0.188 70.08)", level: "low" as const }; // Tailwind amber-500
+  return { color: "var(--primary)", level: null };
+}
+
+/** The most urgent of the drive's and the member's own limit, or null while both have room. */
+function storageWarning(usage: StorageQuota) {
+  const drive = usage.usedBytes / usage.quotaBytes;
+  const member = usage.memberUsedBytes / usage.memberQuotaBytes;
+  if (drive >= 1) return { ratio: drive, text: "Drive full" };
+  if (member >= 1) return { ratio: member, text: "Your storage is full" };
+  if (drive >= 0.9) return { ratio: drive, text: "Drive almost full" };
+  if (member >= 0.9) return { ratio: member, text: "You’re almost at your limit" };
+  return null;
+}
+
+export function StorageCard({ collapsed, onOpen }: { collapsed: boolean; onOpen: () => void }) {
+  const { data: usage, isPending } = useStorageUsage();
+  const percent = usage ? usagePercent(usage.usedBytes, usage.quotaBytes) : 0;
+  const status = isPending ? "Checking usage…" : usage ? `${formatBytes(usage.usedBytes)} of ${formatBytes(usage.quotaBytes)}` : "Usage unavailable";
+  const warning = usage && storageWarning(usage);
+  const summary = `${usage ? `${status} used (${percent}%)` : status}${warning ? `. ${warning.text}` : ""}`;
+  const label = `Storage: ${summary}. Show storage details`;
+
+  if (collapsed) return <div className="flex justify-center"><Hint label={summary} side="right">
+    <button type="button" onClick={onOpen} aria-label={label} aria-haspopup="dialog" className="flex w-full flex-col items-center justify-center gap-1.5 px-3 py-3 outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+      <HardDrive className="size-4 text-muted-foreground" style={warning ? { color: usageSeverity(warning.ratio).color } : undefined} aria-hidden="true" />
+      {usage && <UsageBar usage={usage} total={Math.max(usage.quotaBytes, usage.usedBytes)} className="h-1 w-6" />}
+    </button>
+  </Hint></div>;
+
+  return <button type="button" onClick={onOpen} aria-label={label} aria-haspopup="dialog"
+    className="flex w-full flex-col gap-2 px-3 py-3 text-left outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+    <span className="flex items-baseline justify-between gap-2 text-xs" aria-hidden="true">
+      <span className="font-medium">Storage</span>
+      <span className="truncate tabular-nums text-muted-foreground">{status}</span>
+    </span>
+    {usage ? <UsageBar usage={usage} total={Math.max(usage.quotaBytes, usage.usedBytes)} /> : <span className="h-1.5 rounded-full bg-foreground/15" aria-hidden="true" />}
+    {warning
+      ? <span className="flex items-center gap-1 text-[11px] font-medium" aria-hidden="true"><TriangleAlert className="size-3 shrink-0" style={{ color: usageSeverity(warning.ratio).color }} />{warning.text}</span>
+      : usage && <span className="text-[11px] text-muted-foreground" aria-hidden="true">{usage.fileCount.toLocaleString()} {usage.fileCount === 1 ? "file" : "files"} · {percent}% used</span>}
+  </button>;
 }
 
 export function useConnectedAgents() {

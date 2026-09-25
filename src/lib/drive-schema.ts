@@ -2,8 +2,10 @@ import { sql } from "drizzle-orm";
 import {
   type AnyPgColumn,
   bigint,
+  boolean,
   check,
   index,
+  jsonb,
   pgTable,
   primaryKey,
   text,
@@ -41,9 +43,19 @@ export const driveItems = pgTable(
     passwordVersion: uuid("password_version"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Member who uploaded, created or copied this item; null for items created before ownership was tracked. */
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    /**
+     * Pending uploads only: the complete file this upload becomes a new version of.
+     * Its object key lives under the replaced file's id so it can be promoted without copying bytes.
+     */
+    replacesId: uuid("replaces_id").references((): AnyPgColumn => driveItems.id, { onDelete: "cascade" }),
   },
   (table) => [
     index("drive_items_parent_state_idx").on(table.parentId, table.state),
+    index("drive_items_created_by_idx").on(table.createdBy),
+    index("drive_items_replaces_idx").on(table.replacesId),
+    check("drive_items_replaces_pending_file", sql`${table.replacesId} is null or (${table.kind} = 'file' and ${table.state} = 'pending' and ${table.replacesId} <> ${table.id})`),
     index("drive_items_state_updated_idx").on(table.state, table.updatedAt),
     index("drive_items_trashed_at_idx").on(table.trashedAt),
     check("drive_items_folder_color_valid", sql`${table.folderColor} is null or (
@@ -64,7 +76,6 @@ export const driveItems = pgTable(
         ${table.kind} = 'folder' and ${table.state} = 'complete'
         and ${table.size} = 0 and ${table.mimeType} is null
         and ${table.objectKey} is null and ${table.etag} is null
-        and ${table.publicToken} is null
       ) or (
         ${table.kind} = 'file' and ${table.size} between 0 and 5368709120
         and ${table.mimeType} is not null and ${table.objectKey} is not null
@@ -105,3 +116,60 @@ export const driveActivity = pgTable("drive_activity", {
   primaryKey({ columns: [table.userId, table.itemId] }),
   index("drive_activity_accessed_at_idx").on(table.accessedAt),
 ]);
+
+/**
+ * Earlier contents of a file, kept when a same-named upload replaces it. Object keys stay under
+ * `files/<itemId>/`, so deleting the file (and its versions) never touches another item's bytes.
+ */
+export const driveFileVersions = pgTable("drive_file_versions", {
+  id: uuid("id").primaryKey(),
+  itemId: uuid("item_id").notNull().references(() => driveItems.id, { onDelete: "cascade" }),
+  objectKey: varchar("object_key", { length: 128 }).notNull().unique(),
+  size: bigint("size", { mode: "number" }).notNull(),
+  mimeType: varchar("mime_type", { length: 127 }).notNull(),
+  etag: text("etag").notNull(),
+  /** Member who uploaded this content; null when unknown. */
+  createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+  /** When this content was uploaded (the file's updatedAt at the time). */
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  /** When newer content replaced it. */
+  replacedAt: timestamp("replaced_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index("drive_file_versions_item_idx").on(table.itemId, table.replacedAt),
+  index("drive_file_versions_created_by_idx").on(table.createdBy),
+  check("drive_file_versions_size_valid", sql`${table.size} between 0 and 5368709120`),
+]);
+
+export type DriveFileVersionRow = typeof driveFileVersions.$inferSelect;
+
+export const DRIVE_EVENT_ACTIONS = [
+  "upload", "create_folder", "rename", "move", "copy", "trash", "restore", "delete", "empty_trash",
+  "share", "unshare", "new_version", "restore_version", "delete_version", "protect", "unprotect",
+] as const;
+
+/**
+ * Shared activity history. Rows outlive the items they describe (no foreign key on itemId),
+ * so names are snapshotted when the event happens.
+ */
+export const driveEvents = pgTable("drive_events", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  actorId: text("actor_id").references(() => user.id, { onDelete: "set null" }),
+  actorEmail: varchar("actor_email", { length: 254 }).notNull(),
+  action: text("action", { enum: DRIVE_EVENT_ACTIONS }).notNull(),
+  itemId: uuid("item_id"),
+  itemName: varchar("item_name", { length: 255 }).notNull(),
+  itemKind: text("item_kind", { enum: ["file", "folder"] }).notNull(),
+  /** Folder the item is in after the event; null for the drive root. */
+  parentId: uuid("parent_id"),
+  details: jsonb("details").$type<Record<string, string | number | boolean | null>>().notNull().default({}),
+  /** Item sat inside a password-protected folder (or is one); readers redact it unless they can access it. */
+  protected: boolean("protected").notNull().default(false),
+}, (table) => [
+  index("drive_events_at_idx").on(table.at),
+  index("drive_events_item_idx").on(table.itemId, table.at),
+  index("drive_events_parent_idx").on(table.parentId, table.at),
+  index("drive_events_actor_idx").on(table.actorId, table.at),
+]);
+
+export type DriveEventRow = typeof driveEvents.$inferSelect;

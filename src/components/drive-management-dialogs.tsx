@@ -9,6 +9,7 @@ import { setFolderPassword } from "@/app/actions/folder-security";
 import type { DriveItem } from "@/lib/drive-types";
 import { optimisticDriveChange } from "@/lib/drive-cache";
 import { DriveAccessError, useFolderAccess } from "@/components/folder-access";
+import { useConflictRun, useDriveUndo } from "@/components/drive-undo";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
@@ -49,11 +50,20 @@ export function DriveMoveDialog({ items, onClose, onComplete }: { items: DriveIt
       setOpenError(error instanceof Error ? error.message : "Could not open folder.");
     } finally { setOpening(false); }
   }
+  const conflictRun = useConflictRun();
+  const { offerUndo } = useDriveUndo();
+  const destinationName = listing.data?.currentFolder?.name ?? "All files";
   const mutation = useMutation({
-    mutationFn: () => run(() => moveItems({ ids: items.map((item) => item.id), parentId: folderId })),
-    onMutate: async () => ({ rollback: await optimisticDriveChange(client, { kind: "move", ids: items.map((item) => item.id), parentId: folderId }) }),
-    onError: (_error, _variables, context) => context?.rollback(),
-    onSuccess: () => { toast.success(`${items.length === 1 ? "Item" : `${items.length} items`} moved`); onComplete(); },
+    mutationFn: () => conflictRun((resolutions) => moveItems({ ids: items.map((item) => item.id), parentId: folderId, resolutions }), {
+      operation: "move", destinationName,
+      optimistic: () => optimisticDriveChange(client, { kind: "move", ids: items.map((item) => item.id), parentId: folderId }),
+    }),
+    onSuccess: (result) => {
+      // Cancelled at the name conflict prompt: stay open so another folder can be picked.
+      if (result?.moved.length) offerUndo(`${result.moved.length === 1 ? "Item" : `${result.moved.length} items`} moved to ${destinationName}`, { kind: "move", result });
+      else toast("Nothing was moved");
+      if (result) onComplete();
+    },
     onSettled: () => { void client.invalidateQueries({ queryKey: ["drive"] }); },
   });
   const busy = opening || mutation.isPending;
@@ -84,11 +94,17 @@ export function DriveTrashDialog({ items, permanent = false, onClose, onComplete
   const client = useQueryClient();
   const [confirmation, setConfirmation] = useState("");
   const subject = items.length === 1 ? `“${items[0].name}”` : `${items.length} items`;
+  const { offerUndo } = useDriveUndo();
+  const ids = items.map((item) => item.id);
   const mutation = useMutation({
-    mutationFn: () => run(() => permanent ? permanentlyDeleteItems(items.map((item) => item.id)) : trashItems(items.map((item) => item.id))),
-    onMutate: async () => permanent ? undefined : { rollback: await optimisticDriveChange(client, { kind: "trash", ids: items.map((item) => item.id) }) },
+    mutationFn: () => run(() => permanent ? permanentlyDeleteItems(ids) : trashItems(ids)),
+    onMutate: async () => permanent ? undefined : { rollback: await optimisticDriveChange(client, { kind: "trash", ids }) },
     onError: (_error, _variables, context) => context?.rollback(),
-    onSuccess: () => { toast.success(permanent ? "Permanently deleted" : "Moved to Trash"); onComplete(); },
+    onSuccess: () => {
+      if (permanent) toast.success("Permanently deleted");
+      else offerUndo(`${subject} moved to Trash`, { kind: "trash", ids });
+      onComplete();
+    },
     onSettled: () => { void client.invalidateQueries({ queryKey: ["drive"] }); },
   });
   return <Dialog open onOpenChange={(open) => { if (!open && !mutation.isPending) onClose(); }}>

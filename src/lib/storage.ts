@@ -16,9 +16,9 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { and, eq, isNotNull, lte, or, sql } from "drizzle-orm";
-import type { DriveRow } from "@/lib/drive-schema";
+import type { DriveFileVersionRow, DriveRow } from "@/lib/drive-schema";
 import type { DriveItem, UploadTicket } from "@/lib/drive-types";
-import { canAccessPublic, withDriveTransaction } from "@/lib/drive-access";
+import { withDriveTransaction } from "@/lib/drive-access";
 import { DriveError } from "@/lib/drive-errors";
 import { driveItems } from "@/lib/drive-schema";
 import { MULTIPART_PART_BYTES } from "@/lib/drive-types";
@@ -27,7 +27,6 @@ import { getPreviewKind } from "@/lib/file-preview";
 const DOWNLOAD_TTL_SECONDS = 60;
 const UPLOAD_TTL_SECONDS = 60 * 60;
 const MULTIPART_UPLOAD_TTL_SECONDS = 24 * 60 * 60;
-const PUBLIC_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 let storageClient: S3Client | undefined;
 
@@ -60,6 +59,7 @@ function storage() {
 }
 
 export function toDriveItem(row: DriveRow): DriveItem {
+  const linkActive = row.publicToken && (!row.publicExpiresAt || row.publicExpiresAt.getTime() > Date.now());
   return {
     id: row.id,
     name: row.name,
@@ -69,7 +69,8 @@ export function toDriveItem(row: DriveRow): DriveItem {
     mimeType: row.mimeType,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
-    publicToken: row.publicToken && (!row.publicExpiresAt || row.publicExpiresAt.getTime() > Date.now()) ? row.publicToken : null,
+    publicToken: linkActive ? row.publicToken : null,
+    publicExpiresAt: linkActive ? row.publicExpiresAt?.toISOString() ?? null : null,
     trashedAt: row.trashedAt?.toISOString() ?? null,
     hasPassword: Boolean(row.passwordHash),
     isLocked: Boolean(row.passwordHash),
@@ -85,15 +86,25 @@ export function createObjectKey(id: string) {
   return `files/${id}/${randomBytes(24).toString("hex")}`;
 }
 
+const OBJECT_KEY_PATTERN = /^files\/[0-9a-f-]{36}\/[0-9a-f]{48}$/;
+
 function objectKey(row: DriveRow): string {
+  // A pending replacement upload stores its bytes under the file it will become a version of.
   if (
     row.kind !== "file" || !row.objectKey ||
-    !row.objectKey.startsWith(`files/${row.id}/`) ||
-    !/^files\/[0-9a-f-]{36}\/[0-9a-f]{48}$/.test(row.objectKey)
+    !row.objectKey.startsWith(`files/${row.replacesId ?? row.id}/`) ||
+    !OBJECT_KEY_PATTERN.test(row.objectKey)
   ) {
     throw new DriveError("This file cannot be accessed. Please contact the drive administrator.");
   }
   return row.objectKey;
+}
+
+function versionObjectKey(version: DriveFileVersionRow): string {
+  if (!version.objectKey.startsWith(`files/${version.itemId}/`) || !OBJECT_KEY_PATTERN.test(version.objectKey)) {
+    throw new DriveError("This version cannot be accessed. Please contact the drive administrator.");
+  }
+  return version.objectKey;
 }
 
 function stagedObjectKey(row: DriveRow) {
@@ -129,7 +140,12 @@ export async function abortMultipartUpload(row: DriveRow) {
   }
 }
 
-export async function signUpload(row: DriveRow): Promise<UploadTicket> {
+function partSize(row: DriveRow, partNumber: number) {
+  return Math.min(MULTIPART_PART_BYTES, row.size - (partNumber - 1) * MULTIPART_PART_BYTES);
+}
+
+/** Signs the upload; for multipart, only the parts not in `completedParts` (a resumed upload skips what R2 already has). */
+export async function signUpload(row: DriveRow, completedParts: number[] = []): Promise<UploadTicket> {
   if (row.state !== "pending" || row.trashedAt || !row.mimeType) {
     throw new DriveError("This upload is no longer available.");
   }
@@ -137,22 +153,22 @@ export async function signUpload(row: DriveRow): Promise<UploadTicket> {
   if (row.multipartUploadId) {
     const key = objectKey(row);
     const uploadId = row.multipartUploadId;
-    const partCount = Math.ceil(row.size / MULTIPART_PART_BYTES);
-    const parts = await Promise.all(Array.from({ length: partCount }, async (_, index) => {
-      const partNumber = index + 1;
+    const done = new Set(completedParts);
+    const partNumbers = Array.from({ length: Math.ceil(row.size / MULTIPART_PART_BYTES) }, (_, index) => index + 1);
+    const parts = await Promise.all(partNumbers.filter((partNumber) => !done.has(partNumber)).map(async (partNumber) => {
       const url = await getSignedUrl(client, new UploadPartCommand({
         Bucket: bucket,
         Key: key,
         UploadId: uploadId,
         PartNumber: partNumber,
-        ContentLength: Math.min(MULTIPART_PART_BYTES, row.size - index * MULTIPART_PART_BYTES),
+        ContentLength: partSize(row, partNumber),
       }), {
         expiresIn: MULTIPART_UPLOAD_TTL_SECONDS,
         signableHeaders: new Set(["content-length"]),
       });
       return { partNumber, url };
     }));
-    return { mode: "multipart", id: row.id, partSize: MULTIPART_PART_BYTES, parts };
+    return { mode: "multipart", id: row.id, partSize: MULTIPART_PART_BYTES, parts, completedParts: partNumbers.filter((partNumber) => done.has(partNumber)) };
   }
   const headers = {
     "Content-Type": row.mimeType,
@@ -173,6 +189,30 @@ export async function signUpload(row: DriveRow): Promise<UploadTicket> {
     unhoistableHeaders: new Set(["x-amz-meta-upload-id"]),
   });
   return { mode: "single", id: row.id, url, headers };
+}
+
+/**
+ * Parts of an unfinished multipart upload that R2 already stores with their expected length; the rest must be
+ * (re)sent, and re-sending a part number replaces it. When the multipart upload is gone because R2 already
+ * completed it, every part counts as sent so the client goes straight to completion, which verifies the object.
+ */
+export async function listUploadedParts(row: DriveRow): Promise<number[]> {
+  if (!row.multipartUploadId) return [];
+  const { client, bucket } = storage();
+  const partCount = Math.ceil(row.size / MULTIPART_PART_BYTES);
+  try {
+    const upload = await client.send(new ListPartsCommand({ Bucket: bucket, Key: objectKey(row), UploadId: row.multipartUploadId, MaxParts: 1000 }));
+    return (upload.Parts ?? []).flatMap((part) => part.PartNumber && part.PartNumber <= partCount && part.ETag && part.Size === partSize(row, part.PartNumber) ? [part.PartNumber] : []);
+  } catch (error) {
+    if (!(error instanceof Error && error.name === "NoSuchUpload")) throw error;
+  }
+  try {
+    await verifyUpload(row, true);
+  } catch (error) {
+    if (error instanceof DriveError) throw new DriveError("This upload can no longer be resumed. Discard it and upload the file again.");
+    throw error;
+  }
+  return Array.from({ length: partCount }, (_, index) => index + 1);
 }
 
 export async function verifyUpload(row: DriveRow, finalized = false): Promise<string> {
@@ -214,10 +254,7 @@ async function commitMultipartUpload(row: DriveRow, uploadId: string): Promise<s
       throw new DriveError("The upload is missing parts or does not match the upload details. Finish uploading or cancel it and try again.");
     }
     const parts = upload.Parts.map((part, index) => {
-      if (
-        part.PartNumber !== index + 1 || !part.ETag ||
-        part.Size !== Math.min(MULTIPART_PART_BYTES, row.size - index * MULTIPART_PART_BYTES)
-      ) {
+      if (part.PartNumber !== index + 1 || !part.ETag || part.Size !== partSize(row, index + 1)) {
         throw new DriveError("The uploaded file does not match the upload details. Cancel it and upload the file again.");
       }
       return { PartNumber: part.PartNumber, ETag: part.ETag };
@@ -283,7 +320,30 @@ export async function removeObject(row: DriveRow) {
   // A pending row may already have a final object if a completion transaction failed.
   await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: objectKey(row) }));
   await removeStagedObject(row);
-  await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: `thumbnails/${row.id}/preview-v1.webp` }));
+  await removeThumbnail(row.id);
+}
+
+/** Drops a file's cached preview thumbnail, e.g. after its contents change. */
+export async function removeThumbnail(itemId: string) {
+  const { client, bucket } = storage();
+  await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: thumbnailKey(`thumbnails/${itemId}/preview-v1.webp`) }));
+}
+
+export async function removeVersionObject(version: DriveFileVersionRow) {
+  const { client, bucket } = storage();
+  await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: versionObjectKey(version) }));
+}
+
+/** Short-lived download link for an earlier version, named after the file. */
+export async function signVersionDownload(version: DriveFileVersionRow, name: string): Promise<string> {
+  const { client, bucket } = storage();
+  return getSignedUrl(client, new GetObjectCommand({
+    Bucket: bucket,
+    Key: versionObjectKey(version),
+    ResponseContentDisposition: contentDisposition(name, false),
+    ResponseContentType: "application/octet-stream",
+    ResponseCacheControl: "private, no-store, max-age=0",
+  }), { expiresIn: DOWNLOAD_TTL_SECONDS });
 }
 
 export async function pruneExpiredUploads() {
@@ -407,27 +467,4 @@ export function publicShareUrl(token: string) {
     throw new DriveError("The drive address is not configured correctly. Please contact the drive administrator.");
   }
   return new URL(`/s/${token}`, url.origin).toString();
-}
-
-export async function getPublicFile(token: string): Promise<{
-  item: DriveItem;
-  downloadUrl: string;
-  previewUrl: string | null;
-  sharedByEmail: string | null;
-} | null> {
-  if (!PUBLIC_TOKEN_PATTERN.test(token)) return null;
-  return withDriveTransaction("read", async (tx) => {
-    const [row] = await tx.select().from(driveItems).where(and(
-      eq(driveItems.publicToken, token),
-      eq(driveItems.kind, "file"),
-      eq(driveItems.state, "complete"),
-      sql`(${driveItems.publicExpiresAt} is null or ${driveItems.publicExpiresAt} > clock_timestamp())`,
-    )).limit(1).for("share");
-    if (!row || !(await canAccessPublic(tx, row))) return null;
-    const expiresIn = row.publicExpiresAt ? Math.min(DOWNLOAD_TTL_SECONDS, Math.floor((row.publicExpiresAt.getTime() - Date.now()) / 1000)) : DOWNLOAD_TTL_SECONDS;
-    const [downloadUrl, previewUrl] = await Promise.all([signDownload(row, false, expiresIn), signDownload(row, true, expiresIn)]);
-    if (!downloadUrl) return null;
-    // Never expose the family's folder structure through an unauthenticated share page.
-    return { item: { ...toDriveItem(row), parentId: null }, downloadUrl, previewUrl, sharedByEmail: row.sharedByEmail };
-  });
 }

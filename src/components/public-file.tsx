@@ -4,11 +4,11 @@ import { useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Check, Code2, Copy, Download, File, FileImage, FileMusic, FileText, FileVideo, Link2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
-import { getPublicAccess } from "@/app/actions/public";
+import { getPublicAccess, getPublicFolderFileAccess } from "@/app/actions/public";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverDescription, PopoverHeader, PopoverTitle, PopoverTrigger } from "@/components/ui/popover";
 import { Spinner } from "@/components/spinner";
-import type { DriveItem } from "@/lib/drive-types";
+import type { PublicShareItem } from "@/lib/drive-types";
 import { PdfPreview } from "@/components/pdf-preview";
 import { getPreviewKind, type PreviewKind } from "@/lib/file-preview";
 import { languageFor } from "@/lib/syntax-highlight";
@@ -38,8 +38,9 @@ function describeType(name: string, kind: PreviewKind | null) {
   return extension ? `${extension} file` : "File";
 }
 
-export function PublicFile({ item, token, previewUrl: initialPreview, sharedByEmail }: {
-  item: DriveItem; token: string; previewUrl: string | null; sharedByEmail: string | null;
+/** A shared file's page. `inFolder` marks a file inside a shared folder: no embed code or scan badge, URLs re-checked against the folder share. */
+export function PublicFile({ item, token, inFolder = false, previewUrl: initialPreview, sharedByEmail }: {
+  item: PublicShareItem; token: string; inFolder?: boolean; previewUrl: string | null; sharedByEmail: string | null;
 }) {
   const [previewUrl, setPreviewUrl] = useState(initialPreview);
   const [previewError, setPreviewError] = useState(false);
@@ -52,7 +53,7 @@ export function PublicFile({ item, token, previewUrl: initialPreview, sharedByEm
 
   const access = useMutation({
     mutationFn: async (intent: "download" | "preview") => {
-      const result = await getPublicAccess(token);
+      const result = await (inFolder ? getPublicFolderFileAccess(token, item.id) : getPublicAccess(token));
       if (!result.success) throw new Error(result.error);
       return { ...result.data, intent };
     },
@@ -71,7 +72,7 @@ export function PublicFile({ item, token, previewUrl: initialPreview, sharedByEm
     access.mutate("preview");
   }
 
-  const embeddable = kind !== null && EMBEDDABLE_KINDS[kind] === true;
+  const embeddable = !inFolder && kind !== null && EMBEDDABLE_KINDS[kind] === true;
   async function copy(value: string, done: string, failed: string) {
     try { await navigator.clipboard.writeText(value); toast.success(done); return true; }
     catch { toast.error(failed); return false; }
@@ -134,6 +135,6 @@ export function PublicFile({ item, token, previewUrl: initialPreview, sharedByEm
     </div>
 
     {access.isError && <p role="alert" className="text-sm text-destructive">{access.error.message}</p>}
-    <FileScanBadge token={token} />
+    {!inFolder && <FileScanBadge token={token} />}
   </article>;
 }

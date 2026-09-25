@@ -14,9 +14,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Spinner } from "@/components/spinner";
-import { DriveFileIcon, fileType, formatBytes } from "@/components/drive-item";
+import { DriveFileIcon, fileType } from "@/components/drive-item";
+import { formatBytes } from "@/lib/format-bytes";
 import { PdfPreview } from "@/components/pdf-preview";
 import { TextPreview } from "@/components/text-preview";
 import { ShareQr } from "@/components/share-qr";
@@ -82,20 +84,33 @@ export function DriveNameDialog({ item, parentId, onClose }: { item?: DriveItem;
   </Dialog>;
 }
 
+const EXPIRY_OPTIONS = [
+  { value: "never", label: "Never" },
+  { value: "86400", label: "In 1 day" },
+  { value: "604800", label: "In 7 days" },
+  { value: "2592000", label: "In 30 days" },
+];
+
 export function DriveShareDialog({ item, onClose }: { item: DriveItem; onClose: () => void }) {
   const queryClient = useQueryClient();
   const { run } = useFolderAccess();
+  const folder = item.kind === "folder";
+  const noun = folder ? "folder" : "file";
   const [url, setUrl] = useState<string | null>(item.publicToken ? `${window.location.origin}/s/${item.publicToken}` : null);
+  const [expiresAt, setExpiresAt] = useState(item.publicExpiresAt);
+  // "current" stands for the active link's own expiry; other values are choices applied on create or change.
+  const [expiry, setExpiry] = useState(item.publicExpiresAt ? "current" : "never");
+  const expiryItems = expiresAt ? [{ value: "current", label: `Until ${new Date(expiresAt).toLocaleString("en", { dateStyle: "medium", timeStyle: "short" })}` }, ...EXPIRY_OPTIONS] : EXPIRY_OPTIONS;
   const mutation = useMutation({
-    mutationFn: async (enabled: boolean) => {
-      const result = await run(() => setPublic({ id: item.id, enabled }));
-      return result.url;
-    },
-    onSuccess: (nextUrl) => {
-      setUrl(nextUrl);
+    mutationFn: ({ enabled, choice }: { enabled: boolean; choice?: string }) =>
+      run(() => setPublic({ id: item.id, enabled, expiresIn: choice === undefined || choice === "current" ? undefined : choice === "never" ? null : Number(choice) })),
+    onSuccess: (result, { enabled }) => {
+      toast.success(!enabled ? "Public link revoked" : url ? "Link expiry updated" : "Public link created");
+      setUrl(result.url);
+      setExpiresAt(result.expiresAt);
+      setExpiry(result.expiresAt ? "current" : "never");
       void queryClient.invalidateQueries({ queryKey: ["drive"] });
-      void queryClient.invalidateQueries({ queryKey: ["private-file-scan", item.id] });
-      toast.success(nextUrl ? "Public link created" : "Public link revoked");
+      if (!folder) void queryClient.invalidateQueries({ queryKey: ["private-file-scan", item.id] });
     },
   });
   const [copied, setCopied] = useState(false);
@@ -113,33 +128,41 @@ export function DriveShareDialog({ item, onClose }: { item: DriveItem; onClose: 
   return <Dialog open onOpenChange={(open) => { if (!open && !mutation.isPending) onClose(); }}>
     <DialogContent className="gap-5 sm:max-w-md" showCloseButton={!mutation.isPending}>
       <DialogHeader>
-        <DialogTitle>Share file</DialogTitle>
+        <DialogTitle>{folder ? "Share folder" : "Share file"}</DialogTitle>
         <DialogDescription render={<TruncatedText as="p">{item.name}</TruncatedText>} />
       </DialogHeader>
       <div className="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 p-3">
         <span className={cn("flex size-9 shrink-0 items-center justify-center rounded-lg", url ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground")}>{url ? <Globe2 className="size-4" /> : <LockKeyhole className="size-4" />}</span>
         <div className="min-w-0">
           <p className="text-sm font-medium">{url ? "Anyone with the link" : "Family only"}</p>
-          <p className="text-xs text-muted-foreground">{url ? "Can view and download without signing in." : item.isProtected ? "Files in a protected folder can’t be shared publicly." : "Only verified family members can open this file."}</p>
+          <p className="text-xs text-muted-foreground">{url ? "Can view and download without signing in." : item.isProtected ? (folder ? "Password-protected folders, and folders inside them, can’t be shared publicly." : "Files in a protected folder can’t be shared publicly.") : `Only verified family members can open this ${noun}.`}</p>
         </div>
       </div>
+      {folder && !item.isProtected && <p className="text-xs text-muted-foreground">Anyone with the link can browse, preview and download everything inside this folder, including files added later. Password-protected subfolders and their contents stay hidden.</p>}
+      {!item.isProtected && <div className="flex items-center justify-between gap-3">
+        <p id="share-expiry-label" className="text-sm">Link expires</p>
+        <Select value={expiry} items={expiryItems} disabled={mutation.isPending} onValueChange={(value) => { if (!value) return; if (url) mutation.mutate({ enabled: true, choice: value }); else setExpiry(value); }}>
+          <SelectTrigger size="sm" aria-labelledby="share-expiry-label" className="w-auto"><SelectValue /></SelectTrigger>
+          <SelectContent><SelectGroup>{expiryItems.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectGroup></SelectContent>
+        </Select>
+      </div>}
       {url && <div className="flex flex-col gap-2">
         <div className="flex gap-2">
-          <Input id="public-file-link" aria-label="Public link" value={url} readOnly onFocus={(event) => event.target.select()} className="font-mono text-xs" />
+          <Input id="public-link" aria-label="Public link" value={url} readOnly onFocus={(event) => event.target.select()} className="font-mono text-xs" />
           <Button onClick={copyLink} className="w-24 shrink-0">{copied ? <Check data-icon="inline-start" /> : <Copy data-icon="inline-start" />}{copied ? "Copied" : "Copy"}</Button>
         </div>
         <Button variant="ghost" size="sm" className="self-start text-muted-foreground" aria-expanded={showQr} onClick={() => setShowQr((open) => !open)}>
           <QrCode data-icon="inline-start" />{showQr ? "Hide QR code" : "Show QR code"}
         </Button>
         {showQr && <ShareQr url={url} />}
-        <ScanStatusLine itemId={item.id} />
+        {!folder && <ScanStatusLine itemId={item.id} />}
       </div>}
-      {!url && !item.isProtected && <p className="text-xs text-muted-foreground">Creating a link also sends the file to VirusTotal to scan it for viruses. Your verified email appears on the public page, and you can revoke the link at any time.</p>}
+      {!url && !item.isProtected && <p className="text-xs text-muted-foreground">{folder ? "" : "Creating a link also sends the file to VirusTotal to scan it for viruses. "}Your verified email appears on the public page, and you can revoke the link at any time.</p>}
       {mutation.error && <p role="alert" className="text-sm text-destructive">{mutation.error.message}</p>}
       <DialogFooter className="sm:justify-between">
         {url
-          ? <Hint label="Stops new visits immediately. Copies already downloaded can’t be recalled."><Button variant="destructive" disabled={mutation.isPending} onClick={() => mutation.mutate(false)}>{mutation.isPending ? <Spinner /> : <Link2Off data-icon="inline-start" />}Revoke link</Button></Hint>
-          : <Button disabled={mutation.isPending || item.isProtected} onClick={() => mutation.mutate(true)}>{mutation.isPending ? <Spinner /> : <Link2 data-icon="inline-start" />}Create public link</Button>}
+          ? <Hint label="Stops new visits immediately. Copies already downloaded can’t be recalled."><Button variant="destructive" disabled={mutation.isPending} onClick={() => mutation.mutate({ enabled: false })}>{mutation.isPending ? <Spinner /> : <Link2Off data-icon="inline-start" />}Revoke link</Button></Hint>
+          : <Button disabled={mutation.isPending || item.isProtected} onClick={() => mutation.mutate({ enabled: true, choice: expiry })}>{mutation.isPending ? <Spinner /> : <Link2 data-icon="inline-start" />}Create public link</Button>}
         <Button variant="outline" onClick={onClose} disabled={mutation.isPending}>Done</Button>
       </DialogFooter>
     </DialogContent>

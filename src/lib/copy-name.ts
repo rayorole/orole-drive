@@ -9,3 +9,18 @@ export function copyName(name: string, kind: "file" | "folder", taken: ReadonlyS
     if (!taken.has(candidate)) return candidate;
   }
 }
+
+/**
+ * "Keep both": "photo.jpg" → "photo (1).jpg", "photo (2).jpg"… until free.
+ * `takenLower` holds the destination's names lowercased, matching the case-insensitive conflict check.
+ */
+export function numberedName(name: string, kind: "file" | "folder", takenLower: ReadonlySet<string>) {
+  if (!takenLower.has(name.toLowerCase())) return name;
+  const dot = kind === "file" ? name.lastIndexOf(".") : -1;
+  const [base, extension] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+  for (let n = 1; ; n++) {
+    const suffix = ` (${n})`;
+    const candidate = `${base.slice(0, 255 - suffix.length - extension.length)}${suffix}${extension}`;
+    if (!takenLower.has(candidate.toLowerCase())) return candidate;
+  }
+}

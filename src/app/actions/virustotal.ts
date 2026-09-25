@@ -125,7 +125,7 @@ export async function submitFileScan(id: string, consent: boolean): Promise<Acti
   }, "write");
 }
 
-/** Duplicates getPublicFile's validation constraints rather than importing it, per the share-extras contract. */
+/** Duplicates the public file share's validation constraints (src/lib/public-share.ts) rather than importing them, per the share-extras contract. */
 async function loadPublicScannableFile(tx: DriveTransaction, token: string): Promise<DriveRow> {
   const [row] = await tx.select().from(driveItems).where(and(
     eq(driveItems.publicToken, token),

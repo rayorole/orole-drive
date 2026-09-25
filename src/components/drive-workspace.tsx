@@ -8,7 +8,7 @@ import {
   ArrowDownWideNarrow, ArrowUp, CalendarRange, ChevronRight, ClipboardPaste, Clock3, Cloud, CloudUpload, Download,
   Files, Folder, FolderInput, FolderPlus, FolderUp, HardDrive, LayoutGrid, Link2,
   List, LockKeyhole, LogOut, Menu, PanelLeft, RotateCcw, Search,
-  Star, Tag, Trash2, TriangleAlert, X,
+  Star, Tag, Trash2, TriangleAlert, X, History,
 } from "lucide-react";
 import { toast } from "sonner";
 import { logout } from "@/app/actions/auth";
@@ -43,19 +43,27 @@ import { McpConnectionDialog } from "@/components/mcp-connection-dialog";
 import { DriveNameDialog, DrivePreviewDialog, DriveShareDialog, useDriveDownload } from "@/components/drive-dialogs";
 import { DriveMoveDialog, DrivePasswordDialog, DriveTrashDialog } from "@/components/drive-management-dialogs";
 import { DriveAccessError, FolderAccessProvider, useFolderAccess } from "@/components/folder-access";
+import { NameConflictProvider } from "@/components/name-conflicts";
+import { DriveUndoProvider, useConflictRun, useDriveUndo } from "@/components/drive-undo";
 import { useArchiveDownload } from "@/components/drive-archive";
 import { DriveUploadQueue, useDriveUploads } from "@/components/drive-uploads";
 import { DriveCommandMenu } from "@/components/drive-command-menu";
 import { openCommandMenu } from "@/components/ui/command-menu";
 import { DriveMetadataDialog } from "@/components/drive-metadata-ui";
+import { DriveVersionsDialog } from "@/components/drive-versions-dialog";
+import { DriveActivityView, type ActivityTarget } from "@/components/drive-activity";
+import { EmptyTrashDialog } from "@/components/drive-empty-trash";
 import { AgentConnectButton, StorageCard } from "@/components/sidebar-status";
+import { StorageUsageDialog } from "@/components/storage-usage-dialog";
 import { ScanFileDialog } from "@/components/file-scan-badge";
 import { Hint, TruncatedText } from "@/components/hint";
 import { Kbd } from "@/components/ui/cubby-ui/kbd";
 
 type FamilyUser = { name: string; email: string };
+/** A sidebar destination: a listing filter, or the Activity view. */
+type DriveView = DriveFilter | "activity";
 type OpenDialog = { kind: "folder"; parentId: string | null }
-  | { kind: "rename" | "share" | "preview" | "password" | "details" | "scan"; item: DriveItem }
+  | { kind: "rename" | "share" | "preview" | "password" | "details" | "versions" | "scan"; item: DriveItem }
   | { kind: "move" | "trash" | "permanent"; items: DriveItem[] } | null;
 type FilterValueMap = { type: DriveTypeFilter; tags: string[]; modified: { after: string; before: string }; size: { min: number | null; max: number | null } };
 const typeOptions: { value: Exclude<DriveTypeFilter, "all">; label: string }[] = [
@@ -102,6 +110,7 @@ const destinations = [
   { filter: "recent", label: "Recent", icon: Clock3 },
   { filter: "favorites", label: "Favorites", icon: Star },
   { filter: "public", label: "Public links", icon: Link2 },
+  { filter: "activity", label: "Activity", icon: History },
   { filter: "trash", label: "Trash", icon: Trash2 },
 ] as const;
 
@@ -110,12 +119,11 @@ function LogoutButton({ uploading }: { uploading: boolean }) {
   return <Hint label={uploading ? "Wait for uploads to finish" : "Sign out"}><Button type="submit" variant="ghost" size="icon" disabled={pending || uploading} aria-label={uploading ? "Wait for uploads to finish before signing out" : "Sign out"}>{pending ? <Spinner /> : <LogOut />}</Button></Hint>;
 }
 
-function DriveSidebar({ user, filter, totalBytes, totalFiles, navigate, uploading, collapsed = false }: {
+function DriveSidebar({ user, filter, navigate, onOpenStorage, uploading, collapsed = false }: {
   user: FamilyUser;
-  filter: DriveFilter;
-  totalBytes?: number;
-  totalFiles?: number;
-  navigate: (filter: DriveFilter, folderId?: string) => void;
+  filter: DriveView;
+  navigate: (filter: DriveView, folderId?: string) => void;
+  onOpenStorage: () => void;
   uploading: boolean;
   collapsed?: boolean;
 }) {
@@ -141,9 +149,12 @@ function DriveSidebar({ user, filter, totalBytes, totalFiles, navigate, uploadin
     <nav aria-label="Drive navigation" className="mt-2 flex flex-col gap-0.5 px-3">
       {destinations.map(({ filter: value, label, icon: Icon }) => <Hint key={value} label={collapsed ? label : null} side="right"><button onClick={() => navigate(value)} aria-current={filter === value ? "page" : undefined} aria-label={label} className={cn("flex min-h-9 items-center gap-2.5 overflow-hidden rounded-lg px-2.5 text-left text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-ring motion-safe:transition-colors pointer-coarse:min-h-11", collapsed && "justify-center gap-0 px-0", filter === value ? "bg-sidebar-accent font-medium text-foreground" : "text-muted-foreground hover:bg-sidebar-accent/65 hover:text-foreground")}><Icon className="size-4 shrink-0" strokeWidth={1.6} /><span className={labelClass} aria-hidden={collapsed}>{label}</span></button></Hint>)}
     </nav>
-    <div className="mt-auto flex flex-col gap-4 pt-10">
-      <StorageCard totalBytes={totalBytes} totalFiles={totalFiles} collapsed={collapsed} />
-      <Separator />
+    <div className="mt-auto flex flex-col gap-3 pt-10">
+      <div>
+        <Separator />
+        <StorageCard collapsed={collapsed} onOpen={onOpenStorage} />
+        <Separator />
+      </div>
       <div className={cn("flex items-center gap-2 px-3 pb-3", collapsed && "flex-col")}>
         <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-sidebar-accent text-xs font-medium" aria-hidden="true">{(user.name || user.email).slice(0, 1).toUpperCase()}</span>
         {!collapsed && <div className="min-w-0 flex-1"><p className="truncate text-xs font-medium">{user.name || user.email.split("@")[0]}</p><p className="mt-0.5 truncate text-[11px] text-muted-foreground">{user.email}</p></div>}
@@ -154,7 +165,7 @@ function DriveSidebar({ user, filter, totalBytes, totalFiles, navigate, uploadin
 }
 
 export function DriveWorkspace({ user }: { user: FamilyUser }) {
-  return <FolderAccessProvider><DriveWorkspaceContent user={user} /></FolderAccessProvider>;
+  return <FolderAccessProvider><NameConflictProvider><DriveUndoProvider><DriveWorkspaceContent user={user} /></DriveUndoProvider></NameConflictProvider></FolderAccessProvider>;
 }
 
 function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
@@ -166,6 +177,8 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
   const requestedFilter = params.get("view");
   const filter: DriveFilter = requestedFilter === "public" || requestedFilter === "recent" || requestedFilter === "trash" || requestedFilter === "favorites" ? requestedFilter : "all";
   const trash = filter === "trash";
+  // Activity is its own view, not a listing filter: nothing is listed, selected or uploaded there.
+  const activity = requestedFilter === "activity";
   const [search, setSearch] = useState("");
   const [filterValues, setFilterValues] = useState<FilterValue[]>([]);
   const [sort, setSort] = useState<DriveSort | "activity">(filter === "recent" ? "activity" : "name");
@@ -176,6 +189,8 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
   const [view, setView] = useState<"grid" | "list">("list");
   const [mobileNav, setMobileNav] = useState(false);
   const [mcpOpen, setMcpOpen] = useState(false);
+  const [storageOpen, setStorageOpen] = useState(false);
+  const openStorage = () => { setMobileNav(false); setStorageOpen(true); };
   const [collapsed, setCollapsed] = useState(false);
   const [dialog, setDialog] = useState<OpenDialog>(null);
   const [dragging, setDragging] = useState(false);
@@ -220,9 +235,10 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
       return previousInput?.folderId === folderId && previousInput?.filter === filter ? previous : undefined;
     },
     retry: false,
+    enabled: !activity,
     staleTime: 15_000,
   });
-  const data = listing.data;
+  const data = activity ? undefined : listing.data;
   const items = data?.items ?? [];
   const selectedItems = items.filter((item) => selected.has(item.id));
   const breadcrumbs = data?.breadcrumbs ?? [];
@@ -230,9 +246,10 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
   const attributesActive = Boolean(input.type !== "all" || input.tags?.length || input.after || input.before || input.minSize !== undefined || input.maxSize !== undefined);
   const globalSearch = Boolean(search.trim()) || attributesActive;
   const locked = listing.error instanceof DriveAccessError ? listing.error.lockedFolder : undefined;
-  const title = globalSearch ? (trash ? "Search Trash" : "Search results") : currentFolder?.name ?? (trash ? "Trash" : filter === "public" ? "Public links" : filter === "recent" ? "Recent" : filter === "favorites" ? "Favorites" : "All files");
+  const title = activity ? "Activity" : globalSearch ? (trash ? "Search Trash" : "Search results") : currentFolder?.name ?? (trash ? "Trash" : filter === "public" ? "Public links" : filter === "recent" ? "Recent" : filter === "favorites" ? "Favorites" : "All files");
   const destination = currentFolder?.name ?? "All files";
-  const canUpload = !trash && !locked && !listing.error && !listing.isPending;
+  const canUpload = !trash && !activity && !locked && !listing.error && !listing.isPending;
+  const [emptyingTrash, setEmptyingTrash] = useState(false);
 
   function clearSelection() { setSelection({ scope, ids: new Set() }); rangeAnchor.current = null; }
   function selectOnly(id: string) { setSelection({ scope, ids: new Set([id]) }); rangeAnchor.current = id; }
@@ -248,22 +265,35 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
     onSettled: () => { void client.invalidateQueries({ queryKey: ["drive"] }); },
   });
   const [clipboard, setClipboard] = useState<{ mode: "copy" | "cut"; items: DriveItem[] } | null>(null);
+  const conflictRun = useConflictRun();
+  const { offerUndo } = useDriveUndo();
   const copy = useMutation({
-    mutationFn: ({ ids, target }: { ids: string[]; target: DropTarget }) => run(() => copyItems({ ids, parentId: target.id })),
-    onMutate: ({ ids, target }) => { toast.loading(`Copying ${ids.length === 1 ? "1 item" : `${ids.length} items`} to ${target.name}…`, { id: "drive-copy" }); },
-    onError: (error) => toast.error(error.message, { id: "drive-copy" }),
-    onSuccess: (result, { target }) => toast.success(`${result.copied === 1 ? "Item" : `${result.copied} items`} copied to ${target.name}`, { id: "drive-copy" }),
+    mutationFn: ({ ids, target }: { ids: string[]; target: DropTarget }) => conflictRun((resolutions) => copyItems({ ids, parentId: target.id, resolutions }), { operation: "copy", destinationName: target.name }),
+    onMutate: ({ ids, target }) => ({ toastId: toast.loading(`Copying ${ids.length === 1 ? "1 item" : `${ids.length} items`} to ${target.name}…`) }),
+    onError: (error, _variables, context) => toast.error(error.message, { id: context?.toastId }),
+    onSuccess: (result, { target }, context) => {
+      if (result?.copied) offerUndo(`${result.copied === 1 ? "Item" : `${result.copied} items`} copied to ${target.name}`, { kind: "copy", result }, { id: context?.toastId });
+      else toast("Nothing was copied", { id: context?.toastId });
+    },
     onSettled: () => { void client.invalidateQueries({ queryKey: ["drive"] }); },
   });
   const moveDrop = useMutation({
-    mutationFn: ({ ids, target }: { ids: string[]; target: DropTarget }) => run(() => moveItems({ ids, parentId: target.id })),
-    onMutate: async ({ ids, target }) => ({ rollback: await optimisticDriveChange(client, { kind: "move", ids, parentId: target.id }) }),
-    onError: (error, _variables, context) => { context?.rollback(); toast.error(error.message); },
-    onSuccess: (_result, { ids, target }) => { toast.success(`${ids.length === 1 ? "Item" : `${ids.length} items`} moved to ${target.name}`); clearSelection(); },
+    mutationFn: ({ ids, target }: { ids: string[]; target: DropTarget; cut?: NonNullable<typeof clipboard> }) => conflictRun((resolutions) => moveItems({ ids, parentId: target.id, resolutions }), {
+      operation: "move", destinationName: target.name,
+      optimistic: () => optimisticDriveChange(client, { kind: "move", ids, parentId: target.id }),
+    }),
+    onError: (error) => toast.error(error.message),
+    onSuccess: (result, { target, cut }) => {
+      // Cancelling the name conflict prompt keeps a cut clipboard so pasting can be tried again.
+      if (result && cut) setClipboard((current) => current === cut ? null : current);
+      if (result?.moved.length) offerUndo(`${result.moved.length === 1 ? "Item" : `${result.moved.length} items`} moved to ${target.name}`, { kind: "move", result });
+      else toast("Nothing was moved");
+      if (result) clearSelection();
+    },
     onSettled: () => { void client.invalidateQueries({ queryKey: ["drive"] }); },
   });
   const [marquee, setMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
-  const moveTo = (ids: string[], target: DropTarget) => { if (!actionsDisabled) moveDrop.mutate({ ids, target }); };
+  const moveTo = (ids: string[], target: DropTarget, cut?: NonNullable<typeof clipboard>) => { if (!actionsDisabled) moveDrop.mutate({ ids, target, cut }); };
   const dragPreview = (ids: string[]) => {
     const first = items.find((item) => item.id === ids[0]);
     return <div className="flex w-max max-w-64 cursor-grabbing items-center gap-2 rounded-lg border border-border/70 bg-popover py-1.5 pl-1.5 pr-3 text-sm text-popover-foreground shadow-lg">
@@ -287,7 +317,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
   const stale = listing.isPlaceholderData || deferredSearch !== search.trim() || deferredFilterValues !== filterValues;
   const actionsDisabled = stale || opening || restore.isPending || lock.isPending || moveDrop.isPending || copy.isPending;
   // Pasting goes into the folder being viewed; not into Trash, search results or the Recent/Favorites/Public views.
-  const pasteTarget: DropTarget | null = !clipboard || trash || globalSearch || filter !== "all" || locked || listing.error ? null
+  const pasteTarget: DropTarget | null = !clipboard || trash || activity || globalSearch || filter !== "all" || locked || listing.error ? null
     : { id: folderId ?? null, name: currentFolder?.name ?? "All files" };
   function toClipboard(mode: "copy" | "cut", targets: DriveItem[]) {
     if (!targets.length || trash) return;
@@ -300,11 +330,11 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
     if (clipboard.mode === "copy") return copy.mutate({ ids, target: pasteTarget });
     // Cutting into the folder the items are already in does nothing, like Explorer.
     const moving = clipboard.items.filter((item) => item.parentId !== pasteTarget.id).map((item) => item.id);
-    setClipboard(null);
-    if (moving.length) moveTo(moving, pasteTarget);
+    if (moving.length) moveTo(moving, pasteTarget, clipboard);
+    else setClipboard(null);
   }
 
-  function navigate(nextFilter: DriveFilter, nextFolder?: string) {
+  function navigate(nextFilter: DriveView, nextFolder?: string) {
     if (nextFilter !== filter) {
       setSort(nextFilter === "recent" ? "activity" : "name");
       setDirection(nextFilter === "recent" ? "desc" : "asc");
@@ -330,6 +360,10 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
       if (!trash) void recordOpened(item.id);
     } catch (error) { toast.error(error instanceof Error ? error.message : "Could not open folder."); }
     finally { setOpening(false); }
+  }
+  function openActivityTarget(target: ActivityTarget) {
+    if ("item" in target) void openItem(target.item);
+    else navigate(target.trash ? "trash" : "all", target.folderId ?? undefined);
   }
   function prefetchFolder(item: DriveItem) {
     if (item.kind !== "folder" || item.isLocked || trash || actionsDisabled) return;
@@ -428,7 +462,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
       event.preventDefault();
       reset();
       if (canUpload) addDrop(event.dataTransfer, folderId);
-      else toast.error(trash ? "Open All files or a folder to upload." : "Unlock this folder before uploading.");
+      else toast.error(trash || activity ? "Open All files or a folder to upload." : "Unlock this folder before uploading.");
     }
     window.addEventListener("dragenter", enter);
     window.addEventListener("dragover", over);
@@ -444,7 +478,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
       window.removeEventListener("blur", reset);
       window.removeEventListener("dragend", reset);
     };
-  }, [folderId, canUpload, trash, addDrop]);
+  }, [folderId, canUpload, trash, activity, addDrop]);
   useEffect(() => {
     function paste(event: ClipboardEvent) {
       const target = event.target instanceof HTMLElement ? event.target : null;
@@ -453,11 +487,11 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
       if (!files.length) return;
       event.preventDefault();
       if (canUpload) addFiles(files, folderId);
-      else toast.error(trash ? "Open a folder outside Trash to paste files." : "Unlock this folder before pasting files.");
+      else toast.error(trash || activity ? "Open a folder outside Trash to paste files." : "Unlock this folder before pasting files.");
     }
     window.addEventListener("paste", paste);
     return () => window.removeEventListener("paste", paste);
-  }, [canUpload, folderId, trash, addFiles]);
+  }, [canUpload, folderId, trash, activity, addFiles]);
 
   const uploadActions = <>
     <Button variant="secondary" size="sm" disabled={!canUpload} onClick={() => uploadFiles(folderId)}><ArrowUp data-icon="inline-start" />Upload files</Button>
@@ -467,7 +501,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
   return <div className="flex min-h-dvh bg-background">
     <a href="#drive-content" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-background focus:px-4 focus:py-3 focus:ring-2 focus:ring-ring">Skip to files</a>
     <aside id="drive-sidebar" className={cn("sticky top-0 hidden h-dvh shrink-0 border-r border-sidebar-border bg-sidebar md:block motion-safe:transition-[width] motion-safe:duration-[240ms] motion-safe:ease-[cubic-bezier(.5,0,.1,1)]", collapsed ? "w-[72px]" : "w-[230px]")}>
-      <DriveSidebar user={user} filter={filter} totalBytes={data?.totalBytes} totalFiles={data?.totalFiles} navigate={navigate} uploading={uploads.pending > 0} collapsed={collapsed} />
+      <DriveSidebar user={user} filter={activity ? "activity" : filter} navigate={navigate} onOpenStorage={openStorage} uploading={uploads.pending > 0} collapsed={collapsed} />
     </aside>
     <div className="flex min-w-0 flex-1 flex-col">
       <header className="sticky top-0 z-20 flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border/65 bg-background/95 px-3 backdrop-blur-sm sm:px-5">
@@ -523,10 +557,12 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div className="min-w-0">
                 <TruncatedText as="h1" className="max-w-[80vw] text-xl font-medium tracking-[-0.025em] md:max-w-[50vw]">{title}</TruncatedText>
-                <p className="mt-1.5 max-w-lg text-xs leading-relaxed text-muted-foreground">{trash ? "Items stay in Trash for 30 days. Restoring does not restore public links." : globalSearch ? "Searching all accessible folders in your family’s drive." : filter === "public" ? "Files accessible to anyone with a link." : filter === "recent" ? "Your family’s latest additions and changes." : filter === "favorites" ? "Files and folders you’ve starred." : currentFolder ? "Only your family can access this folder." : "Your family’s files, all in one place."}</p>
+                <p className="mt-1.5 max-w-lg text-xs leading-relaxed text-muted-foreground">{activity ? "Who added, moved, renamed or deleted what in your family’s drive." : trash ? "Items stay in Trash for 30 days. Restoring does not restore public links." : globalSearch ? "Searching all accessible folders in your family’s drive." : filter === "public" ? "Files and folders anyone with a link can open." : filter === "recent" ? "Your family’s latest additions and changes." : filter === "favorites" ? "Files and folders you’ve starred." : currentFolder ? "Only your family can access this folder." : "Your family’s files, all in one place."}</p>
               </div>
-              {!trash && <div className="flex flex-wrap items-center gap-2">{uploadActions}</div>}
+              {trash ? !folderId && !globalSearch && <Button variant="outline" size="sm" disabled={!items.length || listing.isPending} onClick={() => setEmptyingTrash(true)}><Trash2 data-icon="inline-start" />Empty Trash</Button>
+                : !activity && <div className="flex flex-wrap items-center gap-2">{uploadActions}</div>}
             </div>
+            {activity ? <div className="mt-5 flex flex-1 flex-col"><DriveActivityView onOpen={openActivityTarget} /></div> : <>
             <div className="mb-4 mt-5 flex flex-wrap items-center justify-between gap-3">
               <nav aria-label="Folder breadcrumbs" className="min-w-0 max-w-full overflow-x-auto">
                 <ol className="flex items-center gap-1 whitespace-nowrap text-xs text-muted-foreground">
@@ -578,11 +614,12 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
                 : listing.error ? <Alert variant="destructive"><TriangleAlert /><AlertTitle>We couldn’t load your files</AlertTitle><AlertDescription><p>{listing.error.message}</p><div className="mt-3 flex flex-wrap gap-2"><Button variant="outline" size="sm" onClick={() => void listing.refetch()}>Try again</Button>{globalSearch && <Button variant="outline" size="sm" onClick={() => { setSearch(""); setFilterValues([]); }}>Clear filters</Button>}{folderId && <Button variant="outline" size="sm" onClick={() => navigate(trash ? "trash" : "all")}>Back to {trash ? "Trash" : "All files"}</Button>}</div></AlertDescription></Alert>
                 : items.length ? <DriveItems items={items} view={view} selected={selected} trash={trash} disabled={actionsDisabled} onSelect={selectItem} onSelectOnly={selectOnly} cutIds={clipboard?.mode === "cut" ? new Set(clipboard.items.map((item) => item.id)) : undefined} onOpen={(item) => void openItem(item)} onOpenIntent={prefetchFolder} onAction={onItemAction} draggable />
                 : <Empty className="mx-auto my-auto w-full max-w-md border-0 px-0 py-12">
-                  <EmptyHeader><EmptyMedia>{globalSearch ? <Search className="size-10 text-muted-foreground" strokeWidth={1.2} /> : trash ? <Trash2 className="size-10 text-muted-foreground" strokeWidth={1.2} /> : filter === "public" ? <Link2 className="size-10 text-muted-foreground" strokeWidth={1.2} /> : filter === "favorites" ? <Star className="size-10 text-muted-foreground" strokeWidth={1.2} /> : <Folder className="size-12 text-muted-foreground" strokeWidth={1.1} />}</EmptyMedia><EmptyTitle>{globalSearch ? "No matching files" : trash ? "Nothing to restore" : filter === "public" ? "No public links" : filter === "favorites" ? "No favorites yet" : currentFolder ? "This folder is empty" : "Make room for your files"}</EmptyTitle><EmptyDescription>{globalSearch ? "Try a different name, or clear the filters to see more files." : trash ? "Items you move to Trash will appear here for 30 days." : filter === "public" ? "Create a public link from a file’s menu when you want to share it outside your family." : filter === "favorites" ? "Star a file or folder from its menu to find it here quickly." : currentFolder ? `Add files to “${currentFolder.name}”, or create a folder to keep things organized.` : "Upload files or a whole folder to your family’s private drive."}</EmptyDescription></EmptyHeader>
+                  <EmptyHeader><EmptyMedia>{globalSearch ? <Search className="size-10 text-muted-foreground" strokeWidth={1.2} /> : trash ? <Trash2 className="size-10 text-muted-foreground" strokeWidth={1.2} /> : filter === "public" ? <Link2 className="size-10 text-muted-foreground" strokeWidth={1.2} /> : filter === "favorites" ? <Star className="size-10 text-muted-foreground" strokeWidth={1.2} /> : <Folder className="size-12 text-muted-foreground" strokeWidth={1.1} />}</EmptyMedia><EmptyTitle>{globalSearch ? "No matching files" : trash ? "Nothing to restore" : filter === "public" ? "No public links" : filter === "favorites" ? "No favorites yet" : currentFolder ? "This folder is empty" : "Make room for your files"}</EmptyTitle><EmptyDescription>{globalSearch ? "Try a different name, or clear the filters to see more files." : trash ? "Items you move to Trash will appear here for 30 days." : filter === "public" ? "Create a public link from a file or folder’s menu when you want to share it outside your family." : filter === "favorites" ? "Star a file or folder from its menu to find it here quickly." : currentFolder ? `Add files to “${currentFolder.name}”, or create a folder to keep things organized.` : "Upload files or a whole folder to your family’s private drive."}</EmptyDescription></EmptyHeader>
                   <EmptyContent className="w-full">{globalSearch ? <Button variant="outline" onClick={() => { setSearch(""); setFilterValues([]); }}>Clear filters</Button> : trash || filter === "public" || filter === "favorites" ? <Button variant="outline" onClick={() => navigate("all")}>Browse all files</Button> : <><div className="flex flex-wrap justify-center gap-2">{uploadActions}</div><p className="text-xs text-muted-foreground">Or drop files and folders here.</p></>}</EmptyContent>
                 </Empty>}
             </div>
             {canUpload && items.length > 0 && <p className="mt-auto pt-8 text-center text-xs text-muted-foreground">Drop files or folders to upload to {destination}.</p>}
+            </>}
           </div>
           </DriveDndProvider>
         </ContextMenuTrigger>
@@ -596,12 +633,13 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
       </ContextMenu>
     </div>
     <input ref={fileInput} type="file" multiple className="hidden" aria-label="Choose files to upload" onChange={(event) => { const files = Array.from(event.target.files ?? []); if (files.length) uploads.addFiles(files, uploadTarget.current); event.target.value = ""; }} />
-    <Dialog open={mobileNav} onOpenChange={setMobileNav}><DialogContent className="h-[min(680px,90dvh)] sm:max-w-sm"><DialogHeader className="sr-only"><DialogTitle>Drive navigation</DialogTitle><DialogDescription>Browse your family’s shared files and manage your account.</DialogDescription></DialogHeader><DriveSidebar user={user} filter={filter} totalBytes={data?.totalBytes} totalFiles={data?.totalFiles} navigate={navigate} uploading={uploads.pending > 0} /></DialogContent></Dialog>
+    <Dialog open={mobileNav} onOpenChange={setMobileNav}><DialogContent className="h-[min(680px,90dvh)] sm:max-w-sm"><DialogHeader className="sr-only"><DialogTitle>Drive navigation</DialogTitle><DialogDescription>Browse your family’s shared files and manage your account.</DialogDescription></DialogHeader><DriveSidebar user={user} filter={activity ? "activity" : filter} navigate={navigate} onOpenStorage={openStorage} uploading={uploads.pending > 0} /></DialogContent></Dialog>
     <McpConnectionDialog open={mcpOpen} onOpenChange={setMcpOpen} />
-    <DriveCommandMenu filter={filter} items={items} selected={selectedItems} canUpload={canUpload} view={view} collapsed={collapsed}
+    <StorageUsageDialog open={storageOpen} onOpenChange={setStorageOpen} onNavigate={navigate} />
+    <DriveCommandMenu filter={activity ? "activity" : filter} items={items} selected={selectedItems} canUpload={canUpload} view={view} collapsed={collapsed} onEmptyTrash={() => setEmptyingTrash(true)}
       onNavigate={(target) => navigate(target)} onOpenItem={(item) => void openItem(item)} onItemAction={onItemAction}
       onUploadFiles={() => uploadFiles(folderId)} onUploadFolder={() => uploads.chooseFolder(folderId)} onNewFolder={() => setDialog({ kind: "folder", parentId: folderId })}
-      onViewChange={setView} onToggleSidebar={() => setCollapsed(!collapsed)} onConnectAgent={() => setMcpOpen(true)} />
+      onViewChange={setView} onToggleSidebar={() => setCollapsed(!collapsed)} onConnectAgent={() => setMcpOpen(true)} onOpenStorage={openStorage} />
     {dialog?.kind === "folder" && <DriveNameDialog parentId={dialog.parentId} onClose={completeMutation} />}
     {dialog?.kind === "rename" && <DriveNameDialog key={dialog.item.id} item={dialog.item} parentId={folderId} onClose={completeMutation} />}
     {dialog?.kind === "share" && <DriveShareDialog key={dialog.item.id} item={dialog.item} onClose={() => setDialog(null)} />}
@@ -611,6 +649,8 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
     {dialog?.kind === "password" && <DrivePasswordDialog item={dialog.item} onClose={() => setDialog(null)} onComplete={completeMutation} />}
     {dialog?.kind === "scan" && <ScanFileDialog key={dialog.item.id} item={dialog.item} onClose={() => setDialog(null)} />}
     {dialog?.kind === "details" && <DriveMetadataDialog key={dialog.item.id} item={dialog.item} onClose={() => setDialog(null)} />}
+    {dialog?.kind === "versions" && <DriveVersionsDialog key={dialog.item.id} item={dialog.item} onClose={() => setDialog(null)} />}
+    {emptyingTrash && <EmptyTrashDialog onClose={() => setEmptyingTrash(false)} />}
     {archive.dialog}
     <DriveUploadQueue uploads={uploads} />
     {dragging && <div className="pointer-events-none fixed inset-3 z-40 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary bg-background/95" role="status"><div className="flex flex-col items-center gap-4 px-6 text-center"><CloudUpload className="size-12 text-primary" strokeWidth={1.4} /><p className="text-xl font-medium tracking-tight">Drop files or folders to upload</p><p className="text-sm text-muted-foreground">Add to {destination}</p></div></div>}

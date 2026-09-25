@@ -9,7 +9,8 @@ type DriveCacheChange =
 /** Existing rows only: server confirmation remains authoritative for new destinations and access. */
 export async function optimisticDriveChange(client: QueryClient, change: DriveCacheChange): Promise<() => void> {
   await client.cancelQueries({ queryKey: ["drive"] });
-  const snapshots = client.getQueriesData<DriveListing>({ queryKey: ["drive"] });
+  // Other ["drive", …] queries (e.g. storage usage) aren't listings; leave them alone.
+  const snapshots = client.getQueriesData<DriveListing>({ queryKey: ["drive"] }).filter(([, data]) => typeof data === "object" && data !== null && "items" in data);
   const ids = new Set(change.kind === "rename" ? [change.id] : change.ids);
   if (change.kind !== "rename" && change.kind !== "favorite") {
     const knownItems = snapshots.flatMap(([, listing]) => listing?.items ?? []);

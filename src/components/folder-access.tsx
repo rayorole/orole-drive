@@ -3,7 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { unlockFolder } from "@/app/actions/folder-security";
-import type { ActionResult, LockedFolder } from "@/lib/drive-types";
+import type { ActionResult, DriveNameConflict, LockedFolder } from "@/lib/drive-types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
@@ -16,10 +16,13 @@ const FolderAccessContext = createContext<FolderAccess | null>(null);
 
 export class DriveAccessError extends Error {
   readonly lockedFolder?: LockedFolder;
-  constructor(error: string, lockedFolder?: LockedFolder) {
+  /** Set when the destination already has items with these names; ask the user and retry with resolutions. */
+  readonly conflicts?: DriveNameConflict[];
+  constructor(error: string, lockedFolder?: LockedFolder, conflicts?: DriveNameConflict[]) {
     super(error);
     this.name = "DriveAccessError";
     this.lockedFolder = lockedFolder;
+    this.conflicts = conflicts;
   }
 }
 
@@ -49,7 +52,7 @@ export function FolderAccessProvider({ children }: { children: ReactNode }) {
       const startedAt = unlockEpoch.current;
       const result = await operation();
       if (result.success) return result.data;
-      if (!result.lockedFolder) throw new DriveAccessError(result.error);
+      if (!result.lockedFolder) throw new DriveAccessError(result.error, undefined, result.conflicts);
       if ((unlockedAt.current.get(result.lockedFolder.id) ?? 0) > startedAt) continue;
       await requestUnlock(result.lockedFolder);
     }

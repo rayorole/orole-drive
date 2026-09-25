@@ -3,53 +3,38 @@
 import type { SQL } from "drizzle-orm";
 import type { DriveContext, DriveTransaction } from "@/lib/drive-access";
 import type { DriveRow } from "@/lib/drive-schema";
-import type { ActionResult, DriveArchiveManifest, DriveItem, DriveListInput, DriveListing, DriveRestoreResult, UploadTicket } from "@/lib/drive-types";
+import type { ActionResult, DriveArchiveManifest, DriveItem, DriveListInput, DriveListing, DriveRestoreResult, EmptyTrashResult, TrashSummary, UploadResolution, UploadTicket } from "@/lib/drive-types";
 import { randomUUID } from "node:crypto";
 // Aliased: `after` is also the listing's "modified after" date filter.
 import { after as afterResponse } from "next/server";
-import { and, arrayContains, asc, count, desc, eq, gte, ilike, inArray, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
+import { and, arrayContains, asc, desc, eq, gte, ilike, inArray, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import { assertItemAccess, assertItemsAccess, canAccessPublic, driveAction, getItemAccess, getItemsAccess, visibleItemsCondition, withDriveTransaction } from "@/lib/drive-access";
 import { DriveError } from "@/lib/drive-errors";
-import { driveActivity, driveFavorites, driveItems } from "@/lib/drive-schema";
+import { driveFavorites, driveItems } from "@/lib/drive-schema";
 import { assertMoveDepth, childFirst, folderPath, loadTree, MAX_FOLDER_DEPTH, selectedRows } from "@/lib/drive-tree";
-import { MAX_UPLOAD_BYTES, MULTIPART_THRESHOLD_BYTES } from "@/lib/drive-types";
-import { abortMultipartUpload, commitUpload, copyFileObject, createMultipartUpload, createObjectKey, createPublicToken, publicShareUrl, removeObject, removeStagedObject, signDownload, signUpload, toDriveItem } from "@/lib/storage";
-import { permanentlyDeleteDriveItems, restoreDriveItems, trashDriveItems } from "@/lib/trash";
+import { MAX_UPLOAD_BYTES } from "@/lib/drive-types";
+import { copyFileObject, createObjectKey, createPublicToken, publicShareUrl, removeObject, signDownload, toDriveItem } from "@/lib/storage";
+import { cancelTrashedUploads, emptyDriveTrash, permanentlyDeleteDriveItems, restoreDriveItems, trashDriveItems, trashRows, trashSummary } from "@/lib/trash";
+import { recordEvents } from "@/lib/activity";
 import { queueScanSubmission } from "@/lib/virus-scan-jobs";
-import { copyName } from "@/lib/copy-name";
 import { SIGNAL_LABELS, type FileRiskSignal } from "@/lib/file-risk-signals";
 import { prioritizeScans } from "@/lib/file-risk";
 import { driveFileRisks, driveVirusScans } from "@/lib/virustotal-schema";
+import { itemType } from "@/lib/item-type";
+import { assertCapability } from "@/lib/drive-access";
+import type { DriveTree } from "@/lib/drive-tree";
+import type { ConflictResolutions, DriveCopyResult, DriveMoveResult } from "@/lib/drive-types";
+import { assertQuota } from "@/lib/quota";
+import { conflictResolutionsSchema, destinationSiblings } from "@/lib/name-conflicts";
+import { planTransfer } from "@/lib/transfer-plan";
+import { idSchema, mimeSchema, nameSchema, parentSchema, uploadKeySchema, uploadResolutionSchema } from "@/lib/drive-input";
+import { cancelPendingUpload, finishUpload, startUpload } from "@/lib/uploads";
 
 /** Files assessed per listing in the background, so older files get risk scores without a batch job. */
 const RISK_BACKFILL_PER_LISTING = 10;
 
-const idSchema = z.uuid("Choose a valid file or folder.");
 const idsSchema = z.array(idSchema).min(1, "Choose at least one file or folder.").max(1000, "Choose up to 1,000 items at a time.").transform((ids) => [...new Set(ids)]);
-const parentSchema = idSchema.nullable().optional().transform((id) => id ?? null);
-const nameSchema = z.string().trim().normalize().min(1, "Enter a name.").max(255, "Names must be 255 characters or fewer.").refine(
-  (name) => name !== "." && name !== ".." && !name.includes("/") && !name.includes("\\") &&
-    !/[\p{Cc}\p{Bidi_Control}]/u.test(name) && name.isWellFormed() && Buffer.byteLength(name, "utf8") <= 255,
-  "Use a name without slashes or control characters, up to 255 bytes long.",
-);
-const mimeSchema = z.string().trim().toLowerCase().max(127).regex(
-  /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/,
-  "Choose a file with a valid content type.",
-);
-
-const itemType = sql<string>`case
-  when ${driveItems.kind} = 'folder' then 'folder'
-  when ${driveItems.name} ~* '\\.(json|jsonl|js|jsx|ts|tsx|mjs|cjs|html?|css|scss|less|xml|svg|ya?ml|toml|ini|conf|sh|bash|zsh|ps1|bat|cmd|py|rb|php|go|rs|java|kt|swift|c|h|cpp|hpp|cs|sql|vue|svelte|dockerfile|gitignore)$'
-    or ${driveItems.mimeType} in ('application/json', 'application/xml', 'text/html', 'text/css', 'text/javascript', 'application/javascript') then 'code'
-  when ${driveItems.mimeType} like 'image/%' then 'image'
-  when ${driveItems.mimeType} like 'video/%' then 'video'
-  when ${driveItems.mimeType} like 'audio/%' then 'audio'
-  when ${driveItems.mimeType} = 'application/pdf' or ${driveItems.name} ~* '\\.pdf$' then 'pdf'
-  when ${driveItems.name} ~* '\\.(zip|rar|7z|tar|gz|bz2|xz|tgz|zst)$'
-    or ${driveItems.mimeType} in ('application/zip', 'application/x-7z-compressed', 'application/x-rar-compressed', 'application/gzip', 'application/x-tar') then 'archive'
-  when ${driveItems.mimeType} like 'text/%' or ${driveItems.name} ~* '\\.(txt|md|markdown|csv|tsv|log|rst|nfo)$' then 'text'
-  else 'other' end`;
 
 async function itemData(tx: DriveTransaction, ctx: DriveContext, row: DriveRow): Promise<DriveItem> {
   return { ...toDriveItem(row), ...await getItemAccess(tx, ctx, row) };
@@ -94,13 +79,14 @@ export async function listDrive(input: DriveListInput = {}): Promise<ActionResul
       const current = path.at(-1);
       if (current) {
         await assertItemAccess(tx, ctx, current, { allowTrashed: trash });
-        if (trash && !current.trashedAt) throw new DriveError("This folder is not in Trash.");
+        if (trash && (!current.trashedAt || current.deletionStartedAt)) throw new DriveError("This folder is not in Trash.");
       }
       const global = !foldersOnly && Boolean(search || type !== "all" || minSize !== undefined || maxSize !== undefined || after || before || tags?.length);
       const conditions: SQL[] = [eq(driveItems.state, "complete"), visibleItemsCondition(ctx, { trash })];
-      conditions.push(trash ? isNotNull(driveItems.trashedAt) : isNull(driveItems.trashedAt));
+      // Rows being permanently deleted leave Trash immediately; their removal finishes in the background.
+      conditions.push(trash ? and(isNotNull(driveItems.trashedAt), isNull(driveItems.deletionStartedAt))! : isNull(driveItems.trashedAt));
       if (foldersOnly) conditions.push(eq(driveItems.kind, "folder"));
-      else if (filter === "public") conditions.push(eq(driveItems.kind, "file"), isNotNull(driveItems.publicToken), sql`(${driveItems.publicExpiresAt} is null or ${driveItems.publicExpiresAt} > clock_timestamp())`);
+      else if (filter === "public") conditions.push(isNotNull(driveItems.publicToken), sql`(${driveItems.publicExpiresAt} is null or ${driveItems.publicExpiresAt} > clock_timestamp())`);
       else if (filter === "recent") conditions.push(eq(driveItems.kind, "file"), sql`exists (select 1 from drive_activity where drive_activity.item_id = ${driveItems.id} and drive_activity.user_id = ${ctx.userId})`);
       else if (filter === "favorites") conditions.push(sql`exists (select 1 from drive_favorites where drive_favorites.item_id = ${driveItems.id} and drive_favorites.user_id = ${ctx.userId})`);
       if (search) conditions.push(ilike(driveItems.name, `%${search.replace(/[\\%_]/g, "\\$&")}%`));
@@ -130,9 +116,6 @@ export async function listDrive(input: DriveListInput = {}): Promise<ActionResul
       const ordering = sort === "name" ? [desc(driveItems.kind), order(sortColumn), asc(driveItems.id)] : [order(sortColumn), asc(sql`lower(${driveItems.name})`), asc(driveItems.id)];
       const query = tx.select().from(driveItems).where(and(...conditions)).orderBy(...ordering);
       const rows = filter === "recent" && !global ? await query.limit(100) : await query;
-      const [totals] = await tx.select({
-        totalBytes: sql<number>`coalesce(sum(${driveItems.size}), 0)`.mapWith(Number), totalFiles: count(),
-      }).from(driveItems).where(and(eq(driveItems.state, "complete"), eq(driveItems.kind, "file"), visibleItemsCondition(ctx), isNull(driveItems.trashedAt)));
       const access = await getItemsAccess(tx, ctx, current ? [...rows, current] : rows);
       const favoriteScope = current ? [...rows, current] : rows;
       const favoriteIds = favoriteScope.length ? new Set((await tx.select({ id: driveFavorites.itemId }).from(driveFavorites)
@@ -159,7 +142,6 @@ export async function listDrive(input: DriveListInput = {}): Promise<ActionResul
         items: rows.map((row) => ({ ...toDriveItem(row), ...access.get(row.id)!, isFavorite: favoriteIds.has(row.id), scanStatus: scanStatus(row.id), scanSuggestion: scanSuggestion(row.id) })),
         breadcrumbs: path.map(({ id, name }) => ({ id, name })),
         currentFolder: current ? { ...toDriveItem(current), ...access.get(current.id)!, isFavorite: favoriteIds.has(current.id) } : null,
-        totalBytes: totals.totalBytes, totalFiles: totals.totalFiles,
       };
     });
   }, "read");
@@ -170,89 +152,63 @@ export async function createFolder(input: { name: string; parentId?: string | nu
     const { name, parentId } = z.object({ name: nameSchema, parentId: parentSchema }).parse(input);
     return withDriveTransaction("write", async (tx) => {
       await destination(tx, ctx, parentId, true);
-      const [folder] = await tx.insert(driveItems).values({ id: randomUUID(), name, parentId, kind: "folder", state: "complete", size: 0 }).returning();
+      const [folder] = await tx.insert(driveItems).values({ id: randomUUID(), name, parentId, kind: "folder", state: "complete", size: 0, createdBy: ctx.userId }).returning();
+      await recordEvents(tx, ctx, [{ action: "create_folder", item: { id: folder.id, name, kind: "folder", parentId } }]);
       return itemData(tx, ctx, folder);
     });
   });
 }
 
-export async function beginUpload(input: { name: string; size: number; mimeType: string; parentId?: string | null }): Promise<ActionResult<UploadTicket>> {
+/**
+ * Starts an upload. When the name is taken the result lists the conflict (id = `key`, or the name); retry with
+ * `resolution`: "replace" makes the upload a new version of a same-named file (anything else goes to Trash),
+ * "keep-both" uploads under a numbered name.
+ */
+export async function beginUpload(input: { name: string; size: number; mimeType: string; parentId?: string | null; key?: string; resolution?: UploadResolution }): Promise<ActionResult<UploadTicket>> {
   return driveAction(async (ctx) => {
-    const { name, size, mimeType, parentId } = z.object({
+    const { name, size, mimeType, parentId, key, resolution } = z.object({
       name: nameSchema, size: z.number().int().min(0).max(MAX_UPLOAD_BYTES, "Files must be 5 GiB or smaller."), mimeType: mimeSchema, parentId: parentSchema,
+      key: uploadKeySchema.optional(), resolution: uploadResolutionSchema.optional(),
     }).parse(input);
-    let multipartRow: DriveRow | undefined;
-    try {
-      return await withDriveTransaction("write", async (tx) => {
-        await destination(tx, ctx, parentId);
-        const id = randomUUID();
-        const [row] = await tx.insert(driveItems).values({
-          id, name, size, mimeType, parentId, kind: "file", state: "pending", objectKey: createObjectKey(id),
-        }).returning();
-        if (size < MULTIPART_THRESHOLD_BYTES) return signUpload(row);
-        const multipartUploadId = await createMultipartUpload(row);
-        multipartRow = { ...row, multipartUploadId };
-        await tx.update(driveItems).set({ multipartUploadId }).where(eq(driveItems.id, id));
-        return signUpload(multipartRow);
-      });
-    } catch (error) {
-      if (multipartRow) await abortMultipartUpload(multipartRow).catch(() => undefined);
-      throw error;
-    }
+    return startUpload(ctx, { key: key ?? name, name, size, mimeType, parentId, resolution });
   });
 }
 
 export async function completeUpload(id: string): Promise<ActionResult<DriveItem>> {
-  return driveAction(async (ctx) => {
-    id = idSchema.parse(id);
-    const result = await withDriveTransaction("write", async (tx) => {
-      const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id)).for("update");
-      if (!row || row.kind !== "file") throw new DriveError("This upload is no longer available.");
-      await assertItemAccess(tx, ctx, row);
-      if (row.state === "complete") return { row, item: await itemData(tx, ctx, row) };
-      const etag = await commitUpload(row);
-      const [completed] = await tx.update(driveItems).set({ state: "complete", etag, updatedAt: new Date() }).where(eq(driveItems.id, id)).returning();
-      await tx.insert(driveActivity).values({ userId: ctx.userId, itemId: id, accessedAt: new Date() })
-        .onConflictDoUpdate({ target: [driveActivity.userId, driveActivity.itemId], set: { accessedAt: new Date() } });
-      return { row: completed, item: await itemData(tx, ctx, completed) };
-    });
-    // Never remove staging before the database commit: a rolled-back single PUT
-    // completion must still be retryable with the original verified source.
-    await removeStagedObject(result.row).catch(() => undefined);
-    // Score the new file and, if it looks risky, look it up on VirusTotal ahead of everything else.
-    if (!result.item.isProtected) afterResponse(() => prioritizeScans([result.row.id]));
-    return result.item;
-  });
+  return driveAction(async (ctx) => finishUpload(ctx, idSchema.parse(id)));
 }
 
 export async function cancelUpload(id: string): Promise<ActionResult<void>> {
-  return driveAction(async (ctx) => {
-    id = idSchema.parse(id);
-    await withDriveTransaction("write", async (tx) => {
-      const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id)).for("update");
-      if (!row) return;
-      if (row.kind !== "file" || row.state !== "pending") throw new DriveError("This upload has already completed. Move the file to Trash instead.");
-      await assertItemAccess(tx, ctx, row, { allowTrashed: true });
-      await removeObject(row);
-      await tx.delete(driveItems).where(eq(driveItems.id, id));
-    });
-  });
+  return driveAction(async (ctx) => cancelPendingUpload(ctx, idSchema.parse(id)));
 }
 
 export async function renameItem(input: { id: string; name: string }): Promise<ActionResult<void>> {
   return driveAction(async (ctx) => {
     const { id, name } = z.object({ id: idSchema, name: nameSchema }).parse(input);
     await withDriveTransaction("write", async (tx) => {
-      await requireItem(tx, ctx, id);
+      const row = await requireItem(tx, ctx, id);
       await tx.update(driveItems).set({ name, updatedAt: new Date() }).where(eq(driveItems.id, id));
+      if (row.name !== name) await recordEvents(tx, ctx, [{ action: "rename", item: { id, name, kind: row.kind, parentId: row.parentId }, details: { fromName: row.name } }]);
     });
   });
 }
 
-export async function moveItems(input: { ids: string[]; parentId: string | null }): Promise<ActionResult<void>> {
+/**
+ * Replace: checks that the destination items chosen for replacing may go to Trash. Needs the trash
+ * capability (an MCP connection without Trash access can't replace), and never trashes a folder that
+ * holds something being moved or copied, which would take the source (or its parent) with it.
+ */
+async function assertReplaceable(tx: DriveTransaction, replaceIds: string[], incoming: DriveTree): Promise<void> {
+  if (!replaceIds.length) return;
+  assertCapability("trash");
+  const replaced = await loadTree(tx, replaceIds);
+  if (replaced.rows.some((row) => incoming.byId.has(row.id))) throw new DriveError("A folder can’t be replaced by something that’s inside it. Choose Keep both or Skip for it.");
+}
+
+export async function moveItems(input: { ids: string[]; parentId: string | null; resolutions?: ConflictResolutions }): Promise<ActionResult<DriveMoveResult>> {
   return driveAction(async (ctx) => {
-    const { ids, parentId } = z.object({ ids: idsSchema, parentId: parentSchema }).parse(input);
-    await withDriveTransaction("write", async (tx) => {
+    const { ids, parentId, resolutions } = z.object({ ids: idsSchema, parentId: parentSchema, resolutions: conflictResolutionsSchema }).parse(input);
+    const { result, pendingIds } = await withDriveTransaction("write", async (tx) => {
       const selected = await selectedRows(tx, ids);
       if (selected.some((row) => row.state !== "complete" || row.trashedAt)) throw new DriveError("Only available files and folders can be moved.");
       const tree = await loadTree(tx, ids);
@@ -260,11 +216,35 @@ export async function moveItems(input: { ids: string[]; parentId: string | null 
       await assertItemsAccess(tx, ctx, selected);
       const path = await destination(tx, ctx, parentId);
       assertMoveDepth(tree, path);
+      const plan = planTransfer(tree.roots, await destinationSiblings(tx, parentId), resolutions, "move", parentId);
+      await assertReplaceable(tx, plan.replaceIds, tree);
+      const pendingIds = plan.replaceIds.length ? await trashRows(tx, ctx, plan.replaceIds, { reason: "replaced" }) : [];
       if (path.some((folder) => Boolean(folder.passwordHash))) {
         await tx.update(driveItems).set({ publicToken: null, publicExpiresAt: null, sharedByEmail: null }).where(inArray(driveItems.id, tree.rows.map((row) => row.id)));
       }
-      await tx.update(driveItems).set({ parentId, updatedAt: new Date() }).where(inArray(driveItems.id, tree.roots.map((row) => row.id)));
+      const now = new Date();
+      const keepingName = plan.items.filter(({ root, name }) => name === root.name).map(({ root }) => root.id);
+      if (keepingName.length) await tx.update(driveItems).set({ parentId, updatedAt: now }).where(inArray(driveItems.id, keepingName));
+      const renamed = plan.items.filter(({ root, name }) => name !== root.name);
+      for (const { root, name } of renamed) await tx.update(driveItems).set({ parentId, name, updatedAt: now }).where(eq(driveItems.id, root.id));
+      const fromIds = [...new Set(plan.items.flatMap(({ root }) => root.parentId ?? []))];
+      const fromNames = new Map(fromIds.length ? (await tx.select({ id: driveItems.id, name: driveItems.name }).from(driveItems).where(inArray(driveItems.id, fromIds))).map((row) => [row.id, row.name]) : []);
+      const toParentName = path.at(-1)?.name ?? null;
+      await recordEvents(tx, ctx, plan.items.map(({ root, name }) => ({
+        action: "move", item: { id: root.id, name, kind: root.kind, parentId },
+        details: { fromParentId: root.parentId, fromParentName: root.parentId ? fromNames.get(root.parentId) ?? null : null, toParentName, ...(name !== root.name ? { renamedFrom: root.name } : {}) },
+      })));
+      return {
+        result: {
+          moved: plan.items.map(({ root }) => ({ id: root.id, fromParentId: root.parentId })),
+          renamed: renamed.map(({ root }) => ({ id: root.id, fromName: root.name })),
+          replacedIds: plan.replaceIds,
+        },
+        pendingIds,
+      };
     });
+    await cancelTrashedUploads(pendingIds);
+    return result;
   });
 }
 
@@ -273,12 +253,13 @@ const MAX_COPY_ITEMS = 2_000;
 /**
  * Copies files and folders (with everything inside) into a folder. R2 duplicates the bytes server-side
  * before any row exists, so a failure part-way leaves nothing behind: copied objects are removed and
- * no row is written. Public links, favorites and scan results are not copied.
+ * no row is written. Public links, favorites and scan results are not copied. Name collisions are
+ * planned (and asked about) before any bytes are copied, then planned again in the final transaction.
  */
-export async function copyItems(input: { ids: string[]; parentId: string | null }): Promise<ActionResult<{ copied: number }>> {
+export async function copyItems(input: { ids: string[]; parentId: string | null; resolutions?: ConflictResolutions }): Promise<ActionResult<DriveCopyResult>> {
   return driveAction(async (ctx) => {
-    const { ids, parentId } = z.object({ ids: idsSchema, parentId: parentSchema }).parse(input);
-    const plan = await withDriveTransaction("read", async (tx) => {
+    const { ids, parentId, resolutions } = z.object({ ids: idsSchema, parentId: parentSchema, resolutions: conflictResolutionsSchema }).parse(input);
+    const { tree, plan } = await withDriveTransaction("read", async (tx) => {
       const selected = await selectedRows(tx, ids);
       if (selected.some((row) => row.state !== "complete" || row.trashedAt)) throw new DriveError("Only available files and folders can be copied.");
       const tree = await loadTree(tx, ids);
@@ -286,27 +267,25 @@ export async function copyItems(input: { ids: string[]; parentId: string | null 
       const path = await destination(tx, ctx, parentId);
       if (path.some((folder) => tree.byId.has(folder.id))) throw new DriveError("A folder can’t be copied into itself or one of its subfolders.");
       assertMoveDepth(tree, path);
-      const siblings = await tx.select({ name: driveItems.name }).from(driveItems)
-        .where(and(parentId ? eq(driveItems.parentId, parentId) : isNull(driveItems.parentId), isNull(driveItems.trashedAt)));
-      return { tree, taken: new Set(siblings.map((row) => row.name)) };
+      const plan = planTransfer(tree.roots, await destinationSiblings(tx, parentId), resolutions, "copy", parentId);
+      await assertReplaceable(tx, plan.replaceIds, tree);
+      return { tree, plan };
     });
 
     // Parents before children; skip anything trashed or unfinished, and everything under it.
-    const roots = new Set(plan.tree.roots.map((row) => row.id));
+    const rootNames = new Map(plan.items.map(({ root, name }) => [root.id, name]));
     const newIds = new Map<string, string>();
     const rows: { source: DriveRow; copy: typeof driveItems.$inferInsert }[] = [];
-    for (const source of childFirst(plan.tree.rows).reverse()) {
-      const isRoot = roots.has(source.id);
-      if (source.state !== "complete" || source.trashedAt || (!isRoot && !newIds.has(source.parentId ?? ""))) continue;
+    for (const source of childFirst(tree.rows).reverse()) {
+      const rootName = rootNames.get(source.id);
+      if (source.state !== "complete" || source.trashedAt || (rootName === undefined && !newIds.has(source.parentId ?? ""))) continue;
       const id = randomUUID();
       newIds.set(source.id, id);
-      const name = isRoot ? copyName(source.name, source.kind, plan.taken) : source.name;
-      if (isRoot) plan.taken.add(name);
       rows.push({
         source,
         copy: {
-          id, name, kind: source.kind, parentId: isRoot ? parentId : newIds.get(source.parentId!)!,
-          description: source.description, tags: source.tags, folderColor: source.folderColor, state: "complete",
+          id, name: rootName ?? source.name, kind: source.kind, parentId: rootName === undefined ? newIds.get(source.parentId!)! : parentId,
+          description: source.description, tags: source.tags, folderColor: source.folderColor, state: "complete", createdBy: ctx.userId,
           ...(source.kind === "file"
             ? { size: source.size, mimeType: source.mimeType, objectKey: createObjectKey(id) }
             // A copied protected folder stays protected, under a fresh version so earlier unlocks don't carry over.
@@ -315,9 +294,13 @@ export async function copyItems(input: { ids: string[]; parentId: string | null 
       });
     }
     if (rows.length > MAX_COPY_ITEMS) throw new DriveError(`Copies are limited to ${MAX_COPY_ITEMS.toLocaleString("en")} items at a time.`);
-
     const files = rows.filter(({ source }) => source.kind === "file");
+    const totalBytes = files.reduce((sum, { source }) => sum + source.size, 0);
+    // Checked before copying so a copy that can't fit doesn't duplicate gigabytes first; the check in the write transaction is the one that counts.
+    await withDriveTransaction("read", (tx) => assertQuota(tx, ctx, totalBytes));
+
     const copied: DriveRow[] = [];
+    let pendingIds: string[] = [];
     try {
       for (let index = 0; index < files.length; index += 4) {
         await Promise.all(files.slice(index, index + 4).map(async (file) => {
@@ -326,18 +309,32 @@ export async function copyItems(input: { ids: string[]; parentId: string | null 
           copied.push(target);
         }));
       }
-      await withDriveTransaction("write", async (tx) => {
+      pendingIds = await withDriveTransaction("write", async (tx) => {
         await destination(tx, ctx, parentId);
+        const final = planTransfer(tree.roots, await destinationSiblings(tx, parentId), resolutions, "copy", parentId);
+        const unchanged = final.items.length === plan.items.length && final.items.every(({ root }, index) => root.id === plan.items[index].root.id)
+          && final.replaceIds.join() === plan.replaceIds.join();
+        if (!unchanged) throw new DriveError("The destination changed while copying. Nothing was copied; please try again.");
+        const finalNames = new Map(final.items.map(({ root, name }) => [root.id, name]));
+        for (const { source, copy } of rows) copy.name = finalNames.get(source.id) ?? copy.name;
+        await assertReplaceable(tx, final.replaceIds, tree);
+        const trashed = final.replaceIds.length ? await trashRows(tx, ctx, final.replaceIds, { reason: "replaced" }) : [];
+        await assertQuota(tx, ctx, totalBytes);
         for (let index = 0; index < rows.length; index += 500) {
           await tx.insert(driveItems).values(rows.slice(index, index + 500).map((row) => row.copy));
         }
+        await recordEvents(tx, ctx, rows.filter(({ source }) => finalNames.has(source.id)).map(({ source, copy }) => ({
+          action: "copy", item: { id: copy.id!, name: copy.name, kind: copy.kind, parentId }, details: { sourceId: source.id },
+        })));
+        return trashed;
       });
     } catch (error) {
       await Promise.allSettled(copied.map((target) => removeObject(target)));
       if (error instanceof DriveError) throw error;
       throw new DriveError("The copy couldn’t be completed. Nothing was changed.");
     }
-    return { copied: plan.tree.roots.length };
+    await cancelTrashedUploads(pendingIds);
+    return { copied: plan.items.length, ids: plan.items.map(({ root }) => newIds.get(root.id)!), replacedIds: plan.replaceIds };
   });
 }
 
@@ -351,6 +348,15 @@ export async function restoreItems(ids: string[]): Promise<ActionResult<DriveRes
 
 export async function permanentlyDeleteItems(ids: string[]): Promise<ActionResult<void>> {
   return driveAction((ctx) => permanentlyDeleteDriveItems(ctx, idsSchema.parse(ids)));
+}
+
+/** Permanently deletes everything in Trash this member can open. Removal continues in the background when it takes long. */
+export async function emptyTrash(): Promise<ActionResult<EmptyTrashResult>> {
+  return driveAction((ctx) => emptyDriveTrash(ctx), "trash");
+}
+
+export async function getTrashSummary(): Promise<ActionResult<TrashSummary>> {
+  return driveAction((ctx) => trashSummary(ctx), "read");
 }
 
 export async function getArchiveManifest(ids: string[]): Promise<ActionResult<DriveArchiveManifest>> {
@@ -367,26 +373,32 @@ export async function getArchiveManifest(ids: string[]): Promise<ActionResult<Dr
   }, "read");
 }
 
-export async function setPublic(input: { id: string; enabled: boolean; expiresIn?: number }): Promise<ActionResult<{ url: string | null }>> {
+/** `expiresIn`: seconds from now; null removes the expiry; omitted keeps an existing link's expiry. */
+export async function setPublic(input: { id: string; enabled: boolean; expiresIn?: number | null }): Promise<ActionResult<{ url: string | null; expiresAt: string | null }>> {
   return driveAction(async (ctx) => {
     const { id, enabled, expiresIn } = z.object({
-      id: idSchema, enabled: z.boolean(), expiresIn: z.number().int().min(1).max(31_536_000, "Public links can expire up to one year from now.").optional(),
+      id: idSchema, enabled: z.boolean(), expiresIn: z.number().int().min(1).max(31_536_000, "Public links can expire up to one year from now.").nullable().optional(),
     }).parse(input);
-    const { url, created, row } = await withDriveTransaction("write", async (tx) => {
+    const { url, expiresAt, created, row } = await withDriveTransaction("write", async (tx) => {
       const row = await requireItem(tx, ctx, id);
-      if (row.kind !== "file") throw new DriveError("Only files can have public links. Share the files inside this folder instead.");
-      if (enabled && !(await canAccessPublic(tx, row))) throw new DriveError("Files in password-protected folders cannot have public links.");
+      if (enabled && !(await canAccessPublic(tx, row))) {
+        throw new DriveError(row.kind === "folder" ? "Password-protected folders, and folders inside them, cannot have public links." : "Files in password-protected folders cannot have public links.");
+      }
       const now = new Date();
       const existing = row.publicToken && (!row.publicExpiresAt || row.publicExpiresAt > now);
       const publicToken = enabled ? (existing ? row.publicToken : createPublicToken()) : null;
-      const publicExpiresAt = enabled ? (expiresIn === undefined ? (existing ? row.publicExpiresAt : null) : new Date(now.getTime() + expiresIn * 1000)) : null;
+      const publicExpiresAt = !enabled ? null : expiresIn === undefined ? (existing ? row.publicExpiresAt : null) : expiresIn === null ? null : new Date(now.getTime() + expiresIn * 1000);
       const sharedByEmail = enabled ? (existing ? row.sharedByEmail : ctx.email) : null;
       await tx.update(driveItems).set({ publicToken, publicExpiresAt, sharedByEmail, updatedAt: now }).where(eq(driveItems.id, id));
-      return { url: publicToken ? publicShareUrl(publicToken) : null, created: enabled && !existing, row };
+      const expiresAt = publicExpiresAt?.toISOString() ?? null;
+      const item = { id: row.id, name: row.name, kind: row.kind, parentId: row.parentId };
+      if (enabled && (!existing || expiresIn !== undefined)) await recordEvents(tx, ctx, [{ action: "share", item, details: { expiresAt } }]);
+      else if (!enabled && existing) await recordEvents(tx, ctx, [{ action: "unshare", item }]);
+      return { url: publicToken ? publicShareUrl(publicToken) : null, expiresAt, created: enabled && !existing, row };
     });
-    // A new public link sends the file to VirusTotal; the share dialog tells the user before they create it.
-    if (created) await queueScanSubmission(row).catch((error) => console.error(`Could not queue a virus scan for ${row.id}`, error));
-    return { url };
+    // A new public file link sends the file to VirusTotal; the share dialog tells the user before they create it.
+    if (created && row.kind === "file") await queueScanSubmission(row).catch((error) => console.error(`Could not queue a virus scan for ${row.id}`, error));
+    return { url, expiresAt };
   }, "share");
 }
 

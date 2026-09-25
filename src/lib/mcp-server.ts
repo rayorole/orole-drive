@@ -7,6 +7,7 @@ import { acceptedContent, createRequestStateCodec, inputRequired, McpServer, req
 import {
   cancelUpload,
   completeUpload,
+  copyItems,
   createFolder,
   getDownloadUrl,
   getPreviewUrl,
@@ -21,10 +22,11 @@ import { assertItemAccess, driveAction, getItemAccess, runWithDriveContext, with
 import type { DriveActor } from "@/lib/drive-access";
 import { DriveError } from "@/lib/drive-errors";
 import { driveItems } from "@/lib/drive-schema";
-import type { ActionResult, DriveItem } from "@/lib/drive-types";
+import type { ActionResult, ConflictResolution, ConflictResolutions, DriveItem, UploadResolution } from "@/lib/drive-types";
 import { getPreviewKind, readTextPreview } from "@/lib/file-preview";
 import { downloadMcpBytes, extractMcpPdf, MCP_PDF_MAX_BYTES } from "@/lib/mcp-file-content";
 import { toDriveItem } from "@/lib/storage";
+import { getStorageUsage } from "@/app/actions/storage-usage";
 
 const EMBEDDABLE_IMAGE_TYPES: Record<string, true> = {
   "image/jpeg": true, "image/png": true, "image/gif": true, "image/webp": true,
@@ -37,6 +39,9 @@ const dateParam = z.iso.date();
 const typeFilterParam = z.enum(["all", "folder", "image", "video", "audio", "pdf", "text", "code", "archive", "other"]);
 const sortParam = z.enum(["name", "updatedAt", "size", "type"]);
 const directionParam = z.enum(["asc", "desc"]);
+const onConflictParam = z.enum(["replace", "keep-both", "skip"]).default("keep-both").describe(
+  "When the destination already has an item with the same name: keep-both (default) numbers the incoming name, skip leaves the item out, replace moves the existing item to Trash (needs Trash access and the user's confirmation).",
+);
 
 function toolResult<T>(result: ActionResult<T>): CallToolResult {
   if (!result.success) {
@@ -93,12 +98,23 @@ async function readFileTool(actor: DriveActor, id: string): Promise<CallToolResu
   };
 }
 
-async function writeFileTool(actor: DriveActor, input: { name: string; parentId: string | null; content: string; mimeType: string }): Promise<CallToolResult> {
+async function writeFileTool(actor: DriveActor, input: { name: string; parentId: string | null; content: string; mimeType: string; onConflict?: UploadResolution }): Promise<CallToolResult> {
   const size = Buffer.byteLength(input.content, "utf8");
   if (size > MCP_WRITE_FILE_MAX_BYTES) {
     return { content: [{ type: "text", text: `That content is ${size} bytes, over the ${MCP_WRITE_FILE_MAX_BYTES}-byte limit for write_file. Upload larger files through the app instead.` }], isError: true };
   }
-  const ticketResult = await runWithDriveContext(actor, () => beginUpload({ name: input.name, size, mimeType: input.mimeType, parentId: input.parentId }));
+  const request = { name: input.name, size, mimeType: input.mimeType, parentId: input.parentId };
+  let ticketResult = await runWithDriveContext(actor, () => beginUpload(request));
+  const conflict = ticketResult.success ? undefined : ticketResult.conflicts?.[0];
+  if (conflict) {
+    if (!input.onConflict) {
+      return { content: [{ type: "text", text: `${conflict.existingKind === "folder" ? "A folder" : "A file"} named “${conflict.name}” already exists there. Call write_file again with onConflict "replace" (a file's current contents are kept in its version history) or "keep-both" (saves under a numbered name).` }], isError: true };
+    }
+    if (input.onConflict === "replace" && conflict.existingKind === "folder") {
+      return { content: [{ type: "text", text: `“${conflict.name}” is a folder, so write_file can't replace it. Use onConflict "keep-both", or move the folder to Trash first with trash_item.` }], isError: true };
+    }
+    ticketResult = await runWithDriveContext(actor, () => beginUpload({ ...request, resolution: input.onConflict }));
+  }
   if (!ticketResult.success) return toolResult(ticketResult);
   const ticket = ticketResult.data;
   if (ticket.mode !== "single") {
@@ -151,6 +167,23 @@ export function createDriveMcpServer(actor: DriveActor): McpServer {
       return { content: [{ type: "text" as const, text: "Not confirmed. No changes were made." }] };
     }
     return null;
+  }
+
+  /**
+   * Moves/copies never prompt over MCP: the first attempt reports any name conflicts, which all get `onConflict`.
+   * Replace sends the existing items to Trash, so like trash_item it needs Trash access and the user's confirmation.
+   */
+  async function transferTool<T>(operation: string, input: { id: string; parentId: string | null; onConflict: ConflictResolution }, transfer: (resolutions?: ConflictResolutions) => Promise<ActionResult<T>>, ctx: ServerContext) {
+    const first = await runWithDriveContext(actor, () => transfer());
+    if (first.success || !first.conflicts?.length) return toolResult(first);
+    if (input.onConflict === "replace") {
+      if (!actor.capabilities.has("trash")) return { content: [{ type: "text" as const, text: "Replacing moves the existing item to Trash, which this connection isn't allowed to do. Use onConflict \"keep-both\" or \"skip\", or reconnect with Trash access." }], isError: true };
+      const names = first.conflicts.map((conflict) => `"${conflict.name}"`).join(", ");
+      const confirmationResult = await confirmAction(operation, JSON.stringify({ ...input, existing: first.conflicts.map((conflict) => conflict.existingId) }), `Replace ${names} in the destination? The existing ${first.conflicts.length === 1 ? "item moves" : "items move"} to Trash, where ${first.conflicts.length === 1 ? "it" : "they"} can be restored for 30 days.`, ctx);
+      if (confirmationResult) return confirmationResult;
+    }
+    const resolutions: ConflictResolutions = Object.fromEntries(first.conflicts.map((conflict) => [conflict.id, input.onConflict]));
+    return toolResult(await runWithDriveContext(actor, () => transfer(resolutions)));
   }
 
   server.registerTool("list_folder", {
@@ -209,15 +242,18 @@ export function createDriveMcpServer(actor: DriveActor): McpServer {
 
   server.registerTool("write_file", {
     title: "Write file",
-    description: `Creates a new small text or code file (up to ${MCP_WRITE_FILE_MAX_BYTES / 1_048_576}MB) with the given contents.`,
+    description: `Writes a small text or code file (up to ${MCP_WRITE_FILE_MAX_BYTES / 1_048_576}MB) with the given contents. If the name is already taken in the folder, the call fails unless onConflict is set.`,
     inputSchema: z.object({
       name: z.string().trim().min(1).max(255),
       parentId: idParam.nullable().optional(),
       content: z.string(),
       mimeType: z.string().trim().toLowerCase().max(127).default("text/plain"),
+      onConflict: z.enum(["replace", "keep-both"]).optional().describe(
+        "When a file with this name already exists: replace saves these contents as its new version (the previous contents stay in its version history), keep-both saves under a numbered name. Folders can't be replaced.",
+      ),
     }),
     scopeChallenge: requireScopes("mcp:write"),
-  }, async ({ name, parentId, content, mimeType }) => writeFileTool(actor, { name, parentId: parentId ?? null, content, mimeType }));
+  }, async ({ name, parentId, content, mimeType, onConflict }) => writeFileTool(actor, { name, parentId: parentId ?? null, content, mimeType, onConflict }));
 
   server.registerTool("rename_item", {
     title: "Rename item",
@@ -228,10 +264,17 @@ export function createDriveMcpServer(actor: DriveActor): McpServer {
 
   server.registerTool("move_item", {
     title: "Move item",
-    description: "Moves a file or folder to a different parent folder, or to the drive root when parentId is null.",
-    inputSchema: z.object({ id: idParam, parentId: idParam.nullable() }),
+    description: "Moves a file or folder to a different parent folder, or to the drive root when parentId is null. Returns what moved (and from where) plus any items replaced.",
+    inputSchema: z.object({ id: idParam, parentId: idParam.nullable(), onConflict: onConflictParam }),
     scopeChallenge: requireScopes("mcp:write"),
-  }, async ({ id, parentId }) => toolResult(await runWithDriveContext(actor, () => moveItems({ ids: [id], parentId }))));
+  }, async (input, ctx) => transferTool("move_item", input, (resolutions) => moveItems({ ids: [input.id], parentId: input.parentId, resolutions }), ctx));
+
+  server.registerTool("copy_item", {
+    title: "Copy item",
+    description: "Copies a file or folder (with everything inside) into a folder, or the drive root when parentId is null. Copying into the item's own folder names the copy \"name (copy)\". Returns the new copy's id.",
+    inputSchema: z.object({ id: idParam, parentId: idParam.nullable(), onConflict: onConflictParam }),
+    scopeChallenge: requireScopes("mcp:write"),
+  }, async (input, ctx) => transferTool("copy_item", input, (resolutions) => copyItems({ ids: [input.id], parentId: input.parentId, resolutions }), ctx));
 
   server.registerTool("trash_item", {
     title: "Trash item",
@@ -248,8 +291,8 @@ export function createDriveMcpServer(actor: DriveActor): McpServer {
   });
 
   server.registerTool("share_file", {
-    title: "Share file",
-    description: "Creates or revokes a public file link after explicit user confirmation. Anyone with an enabled link can access the file. Optional expiry: 60 to 2,592,000 seconds; otherwise no expiry.",
+    title: "Share file or folder",
+    description: "Creates or revokes a public link for a file or folder after explicit user confirmation. Anyone with an enabled link can view and download the file, or everything inside the folder except password-protected subfolders. Items in password-protected folders cannot be shared. Optional expiry: 60 to 2,592,000 seconds; otherwise no expiry.",
     inputSchema: z.object({
       id: idParam,
       enabled: z.boolean().default(true),
@@ -260,9 +303,9 @@ export function createDriveMcpServer(actor: DriveActor): McpServer {
   }, async ({ id, enabled, expiresIn }, ctx) => {
     const info = await runWithDriveContext(actor, () => getDriveItemInfo(id));
     if (!info.success) return toolResult(info);
-    if (info.data.kind !== "file") return { content: [{ type: "text", text: "Only files can be publicly shared." }], isError: true };
+    const subject = info.data.kind === "folder" ? `the folder "${info.data.name}" and everything inside it (except password-protected subfolders)` : `"${info.data.name}"`;
     const message = enabled
-      ? `Make "${info.data.name}" public to anyone with the link${expiresIn ? ` for ${expiresIn} seconds` : " with no expiry"}? The link can be forwarded to people outside your family.`
+      ? `Make ${subject} public to anyone with the link${expiresIn ? ` for ${expiresIn} seconds` : " with no expiry"}? The link can be forwarded to people outside your family.`
       : `Revoke the public link for "${info.data.name}"? People using that link will lose access.`;
     const confirmationResult = await confirmAction("share_file", JSON.stringify({ id, enabled, expiresIn, updatedAt: info.data.updatedAt }), message, ctx);
     if (confirmationResult) return confirmationResult;
@@ -271,12 +314,9 @@ export function createDriveMcpServer(actor: DriveActor): McpServer {
 
   server.registerTool("storage_summary", {
     title: "Storage summary",
-    description: "Returns the total number of files and bytes stored across the accessible drive.",
+    description: "Returns bytes used against the drive's storage limit and your own limit, a breakdown by file type (current files) plus Trash, old versions and uploads in progress, usage per family member, and the largest files you can access. Sizes are in bytes.",
     inputSchema: z.object({}),
-  }, async () => {
-    const listing = await runWithDriveContext(actor, () => listDrive({}));
-    return toolResult(listing.success ? { success: true, data: { totalBytes: listing.data.totalBytes, totalFiles: listing.data.totalFiles } } : listing);
-  });
+  }, async () => toolResult(await runWithDriveContext(actor, () => getStorageUsage())));
 
   server.registerResource("drive-root", "drive://root", {
     title: "Drive root", description: "Files and folders accessible at the root of the drive.",

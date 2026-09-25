@@ -164,3 +164,20 @@ export function chooseDirectoryFiles(signal: AbortSignal): Promise<File[]> {
   }
   return promise;
 }
+
+/** Opens the file picker for a single file; resolves null when it is closed without a choice (where the browser reports that). */
+export function chooseFile(): Promise<File | null> {
+  const { promise, resolve } = Promise.withResolvers<File | null>();
+  const input = document.createElement("input");
+  input.type = "file";
+  input.hidden = true;
+  const finish = (file: File | null) => {
+    input.remove();
+    resolve(file);
+  };
+  input.addEventListener("change", () => finish(input.files?.[0] ?? null), { once: true });
+  input.addEventListener("cancel", () => finish(null), { once: true });
+  document.body.append(input);
+  input.click();
+  return promise;
+}

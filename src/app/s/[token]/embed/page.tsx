@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { getPublicFile } from "@/lib/storage";
+import { getPublicShare } from "@/lib/public-share";
 import { getPreviewKind } from "@/lib/file-preview";
 
 export const dynamic = "force-dynamic";
@@ -9,8 +9,8 @@ const EMBEDDABLE_KINDS: Record<string, true> = { image: true, video: true, pdf: 
 
 export default async function SharedFileEmbedPage({ params }: { params: Promise<{ token: string }> }) {
   const { token } = await params;
-  const file = await getPublicFile(token);
-  if (!file) notFound();
+  const file = await getPublicShare(token);
+  if (file?.kind !== "file") notFound();
   const kind = getPreviewKind(file.item);
   if (!kind || EMBEDDABLE_KINDS[kind] !== true || !file.previewUrl) notFound();
   return <div className="flex h-dvh w-full items-center justify-center bg-black">

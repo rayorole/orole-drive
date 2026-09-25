@@ -3,10 +3,11 @@
 import { Fragment, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import {
   Archive, ArrowUp, Code2, Download, File, FileImage, FileMusic, FileText,
-  FileVideo, Folder, FolderCog, FolderInput, FolderPlus, FolderUp, Info, KeyRound, Link2, LockKeyhole,
+  FileVideo, Folder, FolderCog, FolderInput, FolderPlus, FolderUp, History, Info, KeyRound, Link2, LockKeyhole,
   Copy, MoreHorizontal, Pencil, Scissors, Plus, RotateCcw, ShieldAlert, ShieldCheck, Star, StarOff, Trash2, UnlockKeyhole,
 } from "lucide-react";
 import type { DriveItem } from "@/lib/drive-types";
+import { formatBytes } from "@/lib/format-bytes";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -24,13 +25,6 @@ import {
   DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent,
   DropdownMenuSubTrigger, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-
-export function formatBytes(bytes: number) {
-  if (bytes === 0) return "0 bytes";
-  const units = ["bytes", "KB", "MB", "GB", "TB"];
-  const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  return `${new Intl.NumberFormat("en", { maximumFractionDigits: unit > 0 ? 1 : 0 }).format(bytes / 1024 ** unit)} ${units[unit]}`;
-}
 
 export function fileType(item: Pick<DriveItem, "name" | "kind" | "mimeType">) {
   if (item.kind === "folder") return "Folder";
@@ -66,7 +60,7 @@ export function DriveFileIcon({ item, large = false }: {
   );
 }
 
-export type DriveItemAction = "open" | "rename" | "trash" | "permanent" | "restore" | "share" | "download" | "move" | "password" | "lock" | "upload-files" | "upload-folder" | "new-folder" | "details" | "scan" | "favorite" | "unfavorite" | "cut" | "copy";
+export type DriveItemAction = "open" | "rename" | "trash" | "permanent" | "restore" | "share" | "download" | "move" | "password" | "lock" | "upload-files" | "upload-folder" | "new-folder" | "details" | "versions" | "scan" | "favorite" | "unfavorite" | "cut" | "copy";
 type ItemActionHandler = (action: DriveItemAction, items: DriveItem[]) => void;
 type MenuEntry = { action: DriveItemAction; label: string; icon: typeof Folder; destructive?: boolean; disabled?: boolean };
 
@@ -101,10 +95,12 @@ function itemMenu(items: DriveItem[], trash: boolean): MenuNode[][] {
     [
       ...(single ? [{ action: "open" as const, label: single.isLocked ? "Unlock folder" : folder ? "Open folder" : "Preview", icon: single.isLocked ? UnlockKeyhole : folder ? Folder : File }] : []),
       { action: "download", label: single?.kind === "file" ? "Download" : "Download ZIP", icon: Download },
-      ...(single?.kind === "file" ? [{ action: "share" as const, label: single.publicToken ? "Manage public link" : single.isProtected ? "Protected — no public links" : "Share file", icon: Link2, disabled: single.isProtected }] : []),
+      ...(single ? [{ action: "share" as const, label: single.publicToken ? "Manage public link" : single.isProtected ? "Protected — no public links" : folder ? "Share folder" : "Share file", icon: Link2, disabled: single.isProtected }] : []),
       ...(single?.kind === "file" ? [scanEntry(single)] : []),
     ],
     [
+      { action: "cut", label: "Cut", icon: Scissors },
+      { action: "copy", label: "Copy", icon: Copy },
       ...(folder ? submenu("Add to folder", Plus, [
         { action: "upload-files", label: "Upload files", icon: ArrowUp },
         { action: "upload-folder", label: "Upload folder", icon: FolderUp },
@@ -115,10 +111,9 @@ function itemMenu(items: DriveItem[], trash: boolean): MenuNode[][] {
           ? { action: "unfavorite", label: "Remove from favorites", icon: StarOff }
           : { action: "favorite", label: "Add to favorites", icon: Star },
         { action: "move", label: "Move to…", icon: FolderInput },
-        { action: "cut", label: "Cut", icon: Scissors },
-        { action: "copy", label: "Copy", icon: Copy },
         ...(single ? [{ action: "rename" as const, label: "Rename", icon: Pencil }] : []),
         ...(single ? [{ action: "details" as const, label: "Details & tags", icon: Info }] : []),
+        ...(single?.kind === "file" ? [{ action: "versions" as const, label: "Version history", icon: History }] : []),
       ]),
       ...(folder ? submenu("Security", ShieldCheck, [
         { action: "password", label: folder.hasPassword ? "Manage password" : "Protect with password", icon: KeyRound },

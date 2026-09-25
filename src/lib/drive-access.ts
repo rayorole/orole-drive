@@ -11,7 +11,7 @@ import { getDb } from "@/lib/db";
 import type { Database, DriveTransaction } from "@/lib/db";
 import { evaluateItemAccess } from "@/lib/drive-access-policy";
 import type { DriveAccessFlags, DriveAccessNode, DriveAccessOptions } from "@/lib/drive-access-policy";
-import { DriveError, LockedFolderError } from "@/lib/drive-errors";
+import { DriveError, LockedFolderError, NameConflictError } from "@/lib/drive-errors";
 import { driveItems } from "@/lib/drive-schema";
 import type { DriveRow } from "@/lib/drive-schema";
 import type { ActionResult } from "@/lib/drive-types";
@@ -40,6 +40,12 @@ export function runWithDriveContext<T>(actor: DriveActor, work: () => Promise<T>
   return driveActors.run(actor, work);
 }
 
+/** For a second capability an action needs only in some cases, e.g. a move that replaces (trashes) an existing item. */
+export function assertCapability(capability: DriveCapability): void {
+  const actor = driveActors.getStore();
+  if (actor && !actor.capabilities.has(capability)) throw new DriveError("This connection does not have permission to perform that operation.");
+}
+
 export async function driveAction<T>(
   work: (ctx: DriveContext) => Promise<T>,
   capability: DriveCapability = "write",
@@ -63,6 +69,9 @@ export async function driveAction<T>(
       }),
     };
   } catch (error) {
+    if (error instanceof NameConflictError) {
+      return { success: false, error: error.message, conflicts: error.conflicts };
+    }
     if (error instanceof LockedFolderError) {
       return { success: false, error: error.message, lockedFolder: error.lockedFolder };
     }
@@ -190,8 +199,29 @@ export async function getItemsAccess(
   return flags;
 }
 
+/** Like `assertItemsAccess`, but per id and without throwing: null when the item is missing or out of reach for this session. */
+export async function tryItemsAccess(
+  tx: DriveTransaction,
+  ctx: DriveContext,
+  ids: string[],
+  options: DriveAccessOptions = {},
+): Promise<Map<string, DriveAccessFlags | null>> {
+  const nodes = await loadAccessNodes(tx, ctx, ids);
+  const flags = new Map<string, DriveAccessFlags | null>();
+  for (const id of ids) {
+    try {
+      flags.set(id, evaluateItemAccess(nodes, id, options));
+    } catch (error) {
+      if (!(error instanceof DriveError)) throw error;
+      flags.set(id, null);
+    }
+  }
+  return flags;
+}
+
+/** A public link needs a complete, active item with no password on it or any ancestor. */
 export async function canAccessPublic(tx: DriveTransaction, row: DriveRow): Promise<boolean> {
-  if (row.kind !== "file" || row.state !== "complete") return false;
+  if (row.state !== "complete") return false;
   const nodes = await loadAccessNodes(tx, null, [row.id]);
   try {
     // No grants are loaded: any protected ancestor makes public access impossible,

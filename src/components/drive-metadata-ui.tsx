@@ -17,6 +17,7 @@ import { Spinner } from "@/components/spinner";
 import { DriveFileIcon } from "@/components/drive-item";
 import { useFolderAccess } from "@/components/folder-access";
 import { FileScanBadge } from "@/components/file-scan-badge";
+import { ItemActivity } from "@/components/drive-activity";
 
 const colorSwatchClass: Record<string, string> = {
   blue: "bg-blue-500", green: "bg-green-500", amber: "bg-amber-500",
@@ -61,7 +62,7 @@ export function DriveMetadataDialog({ item, onClose }: { item: DriveItem; onClos
   function removeTag(tag: string) { setTags(tags.filter((existing) => existing !== tag)); }
 
   return <Dialog open onOpenChange={(open) => { if (!open && !saveMutation.isPending) onClose(); }}>
-    <DialogContent showCloseButton={!saveMutation.isPending} className="sm:max-w-md">
+    <DialogContent showCloseButton={!saveMutation.isPending} className="max-h-[90dvh] overflow-y-auto sm:max-w-md">
       <DialogHeader>
         <div className="flex items-center gap-3">
           <DriveFileIcon item={{ ...item, folderColor: color }} />
@@ -99,6 +100,7 @@ export function DriveMetadataDialog({ item, onClose }: { item: DriveItem; onClos
           <textarea id="drive-item-notes" value={description} maxLength={2_000} disabled={saveMutation.isPending} onChange={(event) => setDescription(event.target.value)} rows={4} placeholder="Add a note about this file or folder…" className="w-full min-w-0 resize-none rounded-lg border border-input bg-transparent px-2.5 py-2 text-base outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 md:text-sm dark:bg-input/30" />
         </Field>
       </FieldGroup>
+      <ItemActivity itemId={item.id} />
       <DialogFooter>
         <Button type="button" variant="outline" onClick={onClose} disabled={saveMutation.isPending}>Close</Button>
         <Button type="button" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>{saveMutation.isPending && <Spinner />}Save details</Button>
