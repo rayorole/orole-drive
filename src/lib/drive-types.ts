@@ -59,6 +59,18 @@ export type SemanticSearchInput = { query: string; limit?: number; folderId?: st
 export type SemanticSearchHit = { item: DriveItem; folderId: string | null; path: string[]; score: number; passages: { text: string; location: string | null }[] };
 /** `degraded`: meaning-based search was unavailable, so only exact keyword matches are shown. */
 export type SemanticSearchResult = { results: SemanticSearchHit[]; degraded: boolean };
+export type DriveChatSummary = { id: string; title: string; updatedAt: string };
+/** `item` is re-authorized every time a chat is loaded: null when this member can no longer open it. */
+export type DriveChatCitation = { n: number; itemId: string; name: string; location: string | null; item: DriveItem | null };
+export type DriveChatMessage = { id: string; role: "user" | "assistant"; content: string; createdAt: string; citations: DriveChatCitation[] };
+export type DriveChat = DriveChatSummary & { messages: DriveChatMessage[] };
+/** One NDJSON line of the /api/drive/chat response stream. */
+export type ChatStreamEvent =
+  | { type: "chat"; chatId: string; title: string }
+  | { type: "searching"; query: string }
+  | { type: "text"; delta: string }
+  | { type: "done"; messageId: string }
+  | { type: "error"; message: string };
 export type DriveScanStatus = "scanning" | "clean" | "suspicious" | "malicious";
 export const FOLDER_COLORS = ["blue", "green", "amber", "red", "violet", "gray"] as const;
 export type DriveFolderColor = (typeof FOLDER_COLORS)[number];

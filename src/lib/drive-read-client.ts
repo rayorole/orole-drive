@@ -66,6 +66,8 @@ export const getPublicFolderFileAccess = (token: string, id: string, signal?: Ab
 export const getPublicFolderArchive = (token: string, id: string, signal?: AbortSignal) => readDrive("getPublicFolderArchive", [token, id], signal);
 export const getSearchStatus = (id: string, signal?: AbortSignal) => readDrive("getSearchStatus", [id], signal);
 export const searchContents = (input: SemanticSearchInput, signal?: AbortSignal) => readDrive("searchContents", [input], signal);
+export const listChats = (signal?: AbortSignal) => readDrive("listChats", [], signal);
+export const getChat = (id: string, signal?: AbortSignal) => readDrive("getChat", [id], signal);
 
 type ThumbnailRequest = {
   id: string;

@@ -4,20 +4,22 @@ import { useQuery } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
 import {
   ArrowUp, Clock3, Download, File, Files, Folder, FolderInput, FolderPlus, FolderUp, HardDrive, LayoutGrid, Link2,
-  History, List, Moon, PanelLeft, Plug, Search, Star, StarOff, Sun, TextSearch, Trash2,
+  History, List, MessagesSquare, Moon, PanelLeft, Plug, Search, Star, StarOff, Sun, TextSearch, Trash2,
 } from "lucide-react";
 import { listDrive } from "@/lib/drive-read-client";
 import type { DriveFilter, DriveItem } from "@/lib/drive-types";
 import { canEditItem } from "@/lib/drive-permissions";
 import type { DriveItemAction } from "@/components/drive-item";
 import { CommandMenu, type CommandMenuAction } from "@/components/ui/command-menu";
+import { useSearchAvailability } from "@/components/search-availability";
 
-const views: { filter: DriveFilter | "activity"; label: string; icon: typeof Files; keywords: string[] }[] = [
+const views: { filter: DriveFilter | "activity" | "ask"; label: string; icon: typeof Files; keywords: string[] }[] = [
   { filter: "all", label: "All files", icon: Files, keywords: ["home", "root", "drive"] },
   { filter: "recent", label: "Recent", icon: Clock3, keywords: ["latest", "opened", "history"] },
   { filter: "favorites", label: "Favorites", icon: Star, keywords: ["starred"] },
   { filter: "public", label: "Public links", icon: Link2, keywords: ["shared", "share"] },
   { filter: "activity", label: "Activity", icon: History, keywords: ["history", "log", "changes", "who", "timeline"] },
+  { filter: "ask", label: "Ask your drive", icon: MessagesSquare, keywords: ["chat", "question", "ai", "assistant", "answer"] },
   { filter: "trash", label: "Trash", icon: Trash2, keywords: ["deleted", "bin", "restore"] },
 ];
 
@@ -31,13 +33,13 @@ function itemAction(item: DriveItem, prefix: string, onOpenItem: (item: DriveIte
 }
 
 export function DriveCommandMenu({ filter, items, selected, canUpload, view, collapsed, onNavigate, onOpenItem, onItemAction, onUploadFiles, onUploadFolder, onNewFolder, onViewChange, onToggleSidebar, onConnectAgent, onOpenStorage, onEmptyTrash, onSearchInside }: {
-  filter: DriveFilter | "activity";
+  filter: DriveFilter | "activity" | "ask";
   items: DriveItem[];
   selected: DriveItem[];
   canUpload: boolean;
   view: "grid" | "list";
   collapsed: boolean;
-  onNavigate: (filter: DriveFilter | "activity") => void;
+  onNavigate: (filter: DriveFilter | "activity" | "ask") => void;
   onOpenItem: (item: DriveItem) => void;
   onItemAction: (action: DriveItemAction, items: DriveItem[]) => void;
   onUploadFiles: () => void;
@@ -52,6 +54,7 @@ export function DriveCommandMenu({ filter, items, selected, canUpload, view, col
   onSearchInside?: (query: string) => void;
 }) {
   const { resolvedTheme, setTheme } = useTheme();
+  const { chat: chatEnabled } = useSearchAvailability();
   const recent = useQuery({
     queryKey: ["command-recent"],
     queryFn: async ({ signal }) => {
@@ -72,7 +75,7 @@ export function DriveCommandMenu({ filter, items, selected, canUpload, view, col
       { id: "sel-favorite", group: selection, label: allFavorites ? "Remove from favorites" : "Add to favorites", icon: allFavorites ? <StarOff /> : <Star />, action: () => onItemAction(allFavorites ? "unfavorite" : "favorite", selected) },
       { id: "sel-trash", group: selection, label: "Move to Trash", icon: <Trash2 />, disabled: !selected.every(canEditItem), action: () => onItemAction("trash", selected) },
     ] : []),
-    ...views.map(({ filter: target, label, icon: Icon, keywords }) => ({
+    ...views.filter(({ filter: target }) => target !== "ask" || chatEnabled).map(({ filter: target, label, icon: Icon, keywords }) => ({
       id: `go-${target}`, group: "Go to", label, keywords, icon: <Icon />,
       hint: target === filter ? "Current" : undefined,
       action: () => onNavigate(target),

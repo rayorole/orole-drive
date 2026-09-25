@@ -2,7 +2,7 @@ import type { ConnectedAgents } from "@/app/actions/mcp-status";
 import type { FileScanStatus } from "@/app/actions/virustotal";
 import type {
   ActionResult, DriveActivityAction, DriveActivityMember, DriveActivityPage,
-  DriveArchiveManifest, DriveFileVersion, DriveItem, DriveListInput, DriveListing,
+  DriveArchiveManifest, DriveChat, DriveChatSummary, DriveFileVersion, DriveItem, DriveListInput, DriveListing,
   ItemSharing, ResumableUpload, SearchIndexStatus, SemanticSearchInput, SemanticSearchResult, ShareMember, StorageUsageReport, TrashSummary,
 } from "@/lib/drive-types";
 
@@ -38,6 +38,8 @@ export interface DriveReadContract {
   getPublicFolderArchive: { args: [token: string, id: string]; data: DriveArchiveManifest };
   getSearchStatus: { args: [id: string]; data: SearchIndexStatus | null };
   searchContents: { args: [input: SemanticSearchInput]; data: SemanticSearchResult };
+  listChats: { args: []; data: DriveChatSummary[] };
+  getChat: { args: [id: string]; data: DriveChat };
 }
 
 export type DriveReadOperation = keyof DriveReadContract;

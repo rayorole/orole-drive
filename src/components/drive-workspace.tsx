@@ -41,6 +41,7 @@ import {
   TriangleAlert,
   X,
   History,
+  MessagesSquare,
 } from "lucide-react";
 import { toast } from "sonner";
 import { logout } from "@/app/actions/auth";
@@ -167,6 +168,7 @@ import { DriveCommandMenu } from "@/components/drive-command-menu";
 import { openCommandMenu } from "@/components/ui/command-menu";
 import { DriveMetadataDialog } from "@/components/drive-metadata-ui";
 import { DriveVersionsDialog } from "@/components/drive-versions-dialog";
+import { DriveChatView } from "@/components/drive-chat";
 import {
   DriveActivityView,
   type ActivityTarget,
@@ -185,8 +187,8 @@ import { Kbd } from "@/components/ui/cubby-ui/kbd";
 import { profileAvatarUrl } from "@/lib/profile-avatar";
 
 type FamilyUser = { name: string; email: string };
-/** A sidebar destination: a listing filter, or the Activity view. */
-type DriveView = DriveFilter | "activity";
+/** A sidebar destination: a listing filter, the Activity view, or Ask your drive. */
+type DriveView = DriveFilter | "activity" | "ask";
 type OpenDialog =
   | { kind: "folder"; parentId: string | null }
   | {
@@ -336,6 +338,7 @@ const destinations = [
   { filter: "favorites", label: "Favorites", icon: Star },
   { filter: "public", label: "Public links", icon: Link2 },
   { filter: "activity", label: "Activity", icon: History },
+  { filter: "ask", label: "Ask", icon: MessagesSquare },
   { filter: "trash", label: "Trash", icon: Trash2 },
 ] as const;
 
@@ -381,6 +384,7 @@ function DriveSidebar({
   onOpenPin: (folder: DriveItem) => void;
   opening: boolean;
 }) {
+  const { chat: chatEnabled } = useSearchAvailability();
   const labelClass = cn(
     "origin-left whitespace-nowrap motion-safe:transition-[opacity,transform] motion-safe:duration-170",
     collapsed &&
@@ -451,7 +455,7 @@ function DriveSidebar({
           aria-label="Drive navigation"
           className="mt-2 flex flex-col gap-0.5 px-3"
         >
-          {destinations.map(({ filter: value, label, icon: Icon }) => (
+          {destinations.filter(({ filter: value }) => value !== "ask" || chatEnabled).map(({ filter: value, label, icon: Icon }) => (
             <Hint key={value} label={collapsed ? label : null} side="right">
               <button
                 onClick={() => navigate(value)}
@@ -561,12 +565,15 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
       ? requestedFilter
       : "all";
   const trash = filter === "trash";
-  // Activity is its own view, not a listing filter: nothing is listed, selected or uploaded there.
+  const { search: searchEnabled, chat: chatEnabled } = useSearchAvailability();
+  const ask = chatEnabled && requestedFilter === "ask";
   const activity = requestedFilter === "activity";
+  // Neither Activity nor Ask lists, selects or uploads anything.
+  const listingless = activity || ask;
+  const currentView: DriveView = ask ? "ask" : activity ? "activity" : filter;
   const [search, setSearch] = useState("");
-  const { search: searchEnabled } = useSearchAvailability();
   // Content matches follow the name results, so the listing stops filling the page while they show.
-  const contentSearch = searchEnabled && filter !== "trash" && search.trim().length >= CONTENT_SEARCH_MIN_CHARS;
+  const contentSearch = searchEnabled && !listingless && filter !== "trash" && search.trim().length >= CONTENT_SEARCH_MIN_CHARS;
   const [filterValues, setFilterValues] = useState<FilterValue[]>([]);
   const [sort, setSort] = useState<DriveSort | "activity">(
     filter === "recent" ? "activity" : "name",
@@ -678,10 +685,10 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
         : undefined;
     },
     retry: false,
-    enabled: !activity && deferredSearch === search.trim() && deferredFilterValues === filterValues,
+    enabled: !listingless && deferredSearch === search.trim() && deferredFilterValues === filterValues,
     staleTime: 15_000,
   });
-  const data = activity ? undefined : listing.data;
+  const data = listingless ? undefined : listing.data;
   const items = data?.items ?? [];
   const selectedItems = items.filter((item) => selected.has(item.id));
   const selectionWritable =
@@ -701,7 +708,9 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
     listing.error instanceof DriveAccessError
       ? listing.error.lockedFolder
       : undefined;
-  const title = activity
+  const title = ask
+    ? "Ask your drive"
+    : activity
     ? "Activity"
     : globalSearch
       ? trash
@@ -720,7 +729,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
   const destination = currentFolder?.name ?? "All files";
   const canUpload =
     !trash &&
-    !activity &&
+    !listingless &&
     !locked &&
     !listing.error &&
     !listing.isPending &&
@@ -1042,6 +1051,9 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
     if ("item" in target) void openItem(target.item);
     else navigate(target.trash ? "trash" : "all", target.folderId ?? undefined);
   }
+  function openChatSource(item: DriveItem) {
+    void openItem(item, false);
+  }
   function prefetchFolder(item: DriveItem) {
     if (item.kind !== "folder" || item.isLocked || trash || actionsDisabled)
       return;
@@ -1221,7 +1233,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
       window.removeEventListener("blur", reset);
       window.removeEventListener("dragend", reset);
     };
-  }, [folderId, canUpload, trash, activity, addDrop]);
+  }, [folderId, canUpload, trash, listingless, addDrop]);
   useEffect(() => {
     function paste(event: ClipboardEvent) {
       const target = event.target instanceof HTMLElement ? event.target : null;
@@ -1242,7 +1254,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
     }
     window.addEventListener("paste", paste);
     return () => window.removeEventListener("paste", paste);
-  }, [canUpload, folderId, trash, activity, addFiles]);
+  }, [canUpload, folderId, trash, listingless, addFiles]);
 
   const uploadActions = (
     <>
@@ -1292,7 +1304,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
       >
         <DriveSidebar
           user={user}
-          filter={activity ? "activity" : filter}
+          filter={currentView}
           navigate={navigate}
           onOpenStorage={openStorage}
           uploading={uploads.pending > 0}
@@ -1439,7 +1451,9 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
                       {title}
                     </TruncatedText>
                     <p className="mt-1.5 max-w-lg text-xs leading-relaxed text-muted-foreground">
-                      {activity
+                      {ask
+                        ? "Answers from files you can open, with sources. Chats are private to you."
+                        : activity
                         ? "Changes to files and folders you can access."
                         : trash
                           ? "Items stay in Trash for 30 days. Restoring does not restore public links."
@@ -1471,13 +1485,17 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
                           Empty Trash
                         </Button>
                       )
-                    : !activity && (
+                    : !listingless && (
                         <div className="flex flex-wrap items-center gap-2">
                           {uploadActions}
                         </div>
                       )}
                 </div>
-                {activity ? (
+                {ask ? (
+                  <div className="mt-5 flex flex-1 flex-col">
+                    <DriveChatView onOpenItem={openChatSource} />
+                  </div>
+                ) : activity ? (
                   <div className="mt-5 flex flex-1 flex-col">
                     <DriveActivityView onOpen={openActivityTarget} />
                   </div>
@@ -2098,7 +2116,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
           </DialogHeader>
           <DriveSidebar
             user={user}
-            filter={activity ? "activity" : filter}
+            filter={currentView}
             navigate={navigate}
             onOpenStorage={openStorage}
             uploading={uploads.pending > 0}
@@ -2118,7 +2136,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
         onNavigate={navigate}
       />
       <DriveCommandMenu
-        filter={activity ? "activity" : filter}
+        filter={currentView}
         items={items}
         selected={selectedItems}
         canUpload={canUpload}
@@ -2138,7 +2156,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
         onConnectAgent={() => setMcpOpen(true)}
         onOpenStorage={openStorage}
         onSearchInside={searchEnabled ? (query) => {
-          if (trash || activity) navigate("all");
+          if (trash || listingless) navigate("all");
           setSearch(query);
         } : undefined}
       />

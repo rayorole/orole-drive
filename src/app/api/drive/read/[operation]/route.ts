@@ -13,7 +13,9 @@ import { listVersions, getVersionDownloadUrl } from "@/app/actions/versions";
 import { getFileScanStatus, getPublicFileScanStatus } from "@/app/actions/virustotal";
 import { getPublicAccess, getPublicFolderFileAccess, getPublicFolderArchive } from "@/app/actions/public";
 import { getSearchStatus, searchContents } from "@/app/actions/search";
+import { getChat, listChats } from "@/app/actions/chat";
 import type { DriveReadActions, DriveReadOperation } from "@/lib/drive-read-contract";
+import { isTrustedDriveRequest } from "@/lib/drive-request";
 
 const reads: DriveReadActions = {
   listDrive, getArchiveManifest, getDownloadUrl, getPreviewUrl, getTrashSummary,
@@ -21,6 +23,7 @@ const reads: DriveReadActions = {
   listPinnedFolders, getStorageUsage, getThumbnailUrls, listResumableUploads,
   listVersions, getVersionDownloadUrl, getFileScanStatus, getPublicFileScanStatus,
   getPublicAccess, getPublicFolderFileAccess, getPublicFolderArchive, getSearchStatus, searchContents,
+  listChats, getChat,
 };
 const requestSchema = z.object({ args: z.array(z.unknown()).max(2) }).strict();
 
@@ -36,18 +39,7 @@ export async function POST(request: Request, context: { params: Promise<{ operat
       "Server-Timing": `read;dur=${(performance.now() - started).toFixed(1)}`,
     },
   });
-  // Reverse proxies can give Next an internal request URL. Only deployment-owned
-  // configuration selects trusted browser origins; forwarded headers cannot add one.
-  const origin = request.headers.get("origin");
-  const publicUrls = [
-    process.env.BETTER_AUTH_URL ?? (process.env.NODE_ENV !== "production" ? "http://localhost:3000" : undefined),
-    process.env.VERCEL_URL && `https://${process.env.VERCEL_URL}`,
-    process.env.VERCEL_PROJECT_PRODUCTION_URL && `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`,
-  ];
-  const trustedOrigin = publicUrls.some((url) => url && origin === new URL(url).origin);
-  if (!trustedOrigin ||
-      request.headers.get("x-orole-read") !== "1" ||
-      request.headers.get("content-type")?.split(";", 1)[0].trim() !== "application/json") {
+  if (!isTrustedDriveRequest(request, "x-orole-read")) {
     return respond({ success: false, error: "This request must come from the drive. Refresh and try again." }, 403);
   }
   const { operation } = await context.params;

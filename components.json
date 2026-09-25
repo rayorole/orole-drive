@@ -23,6 +23,7 @@
   "menuAccent": "subtle",
   "registries": {
     "@cubby-ui": "https://www.cubby-ui.dev/r/{name}.json",
-    "@kobra": "https://kobra.systems/r/{name}.json"
+    "@kobra": "https://kobra.systems/r/{name}.json",
+    "@assistant-ui": "https://r.assistant-ui.com/styles/{style}/{name}.json"
   }
 }
