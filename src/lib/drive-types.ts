@@ -3,6 +3,11 @@ import type { DRIVE_EVENT_ACTIONS } from "@/lib/drive-schema";
 export type DrivePermission = "owner" | "editor" | "viewer";
 export type DriveAccessMode = "private" | "inherit" | "members" | "selected";
 export type ShareMember = { id: string; name: string; email: string };
+export type DriveSharingStatus = {
+  public: "direct" | "inherited" | null;
+  members: "all" | "selected" | null;
+  membersInherited: boolean;
+};
 export type ItemSharing = {
   accessMode: DriveAccessMode;
   memberRole: "viewer" | "editor";
@@ -20,6 +25,7 @@ export type DriveItem = {
   owner: ShareMember | null;
   accessMode: DriveAccessMode;
   permission: DrivePermission;
+  sharing: DriveSharingStatus;
   size: number;
   mimeType: string | null;
   createdAt: string;

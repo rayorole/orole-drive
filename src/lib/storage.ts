@@ -68,6 +68,7 @@ export function toDriveItem(row: DriveRow): DriveItem {
     owner: null,
     accessMode: row.accessMode,
     permission: "viewer",
+    sharing: { public: null, members: null, membersInherited: false },
     size: row.size,
     mimeType: row.mimeType,
     createdAt: row.createdAt.toISOString(),

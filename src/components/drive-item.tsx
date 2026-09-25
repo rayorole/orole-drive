@@ -45,6 +45,7 @@ import {
 import type { DriveItem } from "@/lib/drive-types";
 import { formatBytes } from "@/lib/format-bytes";
 import { canEditItem, canManageItem } from "@/lib/drive-permissions";
+import { SharingBadges } from "@/components/sharing-badges";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -591,12 +592,7 @@ function ItemStatus({ item }: { item: DriveItem }) {
           className="size-3.5 shrink-0 text-muted-foreground"
         />
       )}
-      {item.publicToken && (
-        <Link2
-          aria-label="Public link enabled"
-          className="size-3.5 shrink-0 text-primary"
-        />
-      )}
+      <SharingBadges sharing={item.sharing} />
       {item.scanStatus === "scanning" && <ScanningIndicator itemId={item.id} />}
       {(item.scanStatus === "suspicious" ||
         item.scanStatus === "malicious") && (

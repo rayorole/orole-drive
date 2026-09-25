@@ -121,7 +121,7 @@ export function LoginForm({ oauthQuery = "" }: { oauthQuery?: string }) {
                   autoComplete="email"
                   autoCapitalize="none"
                   spellCheck={false}
-                  placeholder="you@orole.be"
+                  placeholder="Your email address"
                   required
                   maxLength={254}
                   disabled={pending}
@@ -131,7 +131,7 @@ export function LoginForm({ oauthQuery = "" }: { oauthQuery?: string }) {
                   aria-describedby={error ? "email-help login-error" : "email-help"}
                   className="h-12"
                 />
-                <FieldDescription id="email-help">Only @orole.be email addresses can sign in.</FieldDescription>
+                <FieldDescription id="email-help">Sign in with an email address from an approved domain.</FieldDescription>
               </Field>
             ) : (
               <Field data-invalid={Boolean(error)} data-disabled={pending}>
@@ -182,7 +182,7 @@ export function LoginForm({ oauthQuery = "" }: { oauthQuery?: string }) {
           </>
         ) : (
           <p className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
-            <Mail className="size-3.5 shrink-0" aria-hidden="true" />Use your @orole.be email.
+            <Mail className="size-3.5 shrink-0" aria-hidden="true" />A sign-in code will be sent to your email.
           </p>
         )}
       </CardFooter>

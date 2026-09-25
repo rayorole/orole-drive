@@ -1,6 +1,6 @@
 # Orole Drive
 
-Private family storage at https://drive.orole.be. Verified `@orole.be` members own their files and folders and choose who can access them: only themselves, all drive members, selected accounts or an explicit public link.
+Private family storage at https://drive.orole.be. Verified members from approved email domains own their files and folders and choose who can access them: only themselves, all drive members, selected accounts or an explicit public link.
 
 ## Stack
 
@@ -48,10 +48,11 @@ Generate a migration after changing a schema with `npm run db:generate`; inspect
 
 ## Access and storage
 
-- Sign-in requires a six-digit emailed code. Only the exact `orole.be` domain is accepted, not suffix lookalikes or subdomains. Codes expire after ten minutes, are stored hashed, have bounded verification attempts and are single-use. Sending and verification are throttled in Postgres.
+- Sign-in requires a six-digit emailed code and an email domain in `EMAIL_DOMAIN_WHITELIST` in `src/lib/auth-policy.ts`, currently `orole.be` and `ronzani.be`. Matching is case-insensitive and exact: suffix lookalikes and subdomains are rejected. The same whitelist governs OTP requests, account creation/updates, sessions, drive visibility and member selection. Codes expire after ten minutes, are stored hashed, have bounded verification attempts and are single-use. Sending and verification are throttled in Postgres.
 - Nested folders support multi-selection, recursive ZIP downloads, bulk moves with cycle prevention, list/grid views, breadcrumbs and sorting. Search spans accessible folders, with compact Cubby UI segmented filters for file type, modified dates, size and tags.
 - **Ownership and sharing:** new top-level files and folders are owner-private. New children inherit their folder's access, including future uploads into shared folders; explicitly choosing **Only me** stops inheritance. Owners can share with all verified drive members or selected registered accounts, with **Viewer** or **Editor** access. Viewers can read, download and make their own copies; editors can also change contents and metadata and perform authorized file operations. Only the direct owner can change sharing, public links or folder passwords.
 - Ownership is separate from who supplied the current version's bytes: replacing content or restoring an old version never transfers ownership. The explorer shows **Owner** immediately before **Date modified**. Copying creates a new item owned by the copier, private at the top level or inheriting its destination folder.
+- Sharing badges appear beside names in list/grid views and pinned folders: a globe marks public access, and a people icon marks all-member or selected-member access. Labels distinguish the audience and inherited access. Explicit private overrides, expired links, protected public paths and Trash do not retain a misleading public badge.
 - Item permissions are enforced server-side, including search, previews, downloads, versions, uploads, ZIP manifests and MCP. Directly shared nested items can appear at the recipient's top level without exposing private ancestor names. Folder ownership grants editor access through inherited descendants, not ownership; another uploader's explicit private child remains private.
 - Trash supports restoring subtrees to their original location (or the root when unavailable). Public links are revoked on trashing and are not restored. The daily 03:00 UTC Vercel job permanently purges items after 30 days; durable deletion markers allow retries without restoring partially removed files.
 - **Empty Trash** permanently deletes accessible Trash contents after typing DELETE. Locked items are kept and reported. Deleting items disappear immediately; removal continues in the background and the daily cleanup retries unfinished deletions. Permanent deletion cannot be undone.

@@ -14,6 +14,7 @@ import { Hint } from "@/components/hint";
 import { ContextMenu, ContextMenuContent, ContextMenuGroup, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/cubby-ui/context-menu";
 import { DriveMetadataDialog } from "@/components/drive-metadata-ui";
 import { FolderIcon } from "@/components/folder-icon";
+import { SharingBadges } from "@/components/sharing-badges";
 
 const pinsKey = ["drive", "pinned-folders"] as const;
 interface PinsState {
@@ -78,8 +79,9 @@ export function PinnedFoldersNav({ collapsed, folderId, onOpen, disabled }: {
         <Hint label={collapsed ? item.name : null} side="right">
           <ContextMenuTrigger render={<button type="button" disabled={disabled} />} onClick={() => onOpen(item)} aria-label={`Open pinned folder ${item.name}`} aria-current={folderId === item.id ? "page" : undefined}
             className={cn("flex min-h-9 w-full min-w-0 items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 pointer-coarse:min-h-11", collapsed && "justify-center px-0", folderId === item.id ? "bg-sidebar-accent font-medium text-foreground" : "text-muted-foreground hover:bg-sidebar-accent/65 hover:text-foreground")}>
-            <span className="relative shrink-0"><FolderIcon item={item} compact />{item.isLocked && <LockKeyhole aria-label="Locked folder" className="absolute -left-1 -top-1 size-2.5" />}</span>
+            <span className="relative shrink-0"><FolderIcon item={item} compact />{item.isLocked && <LockKeyhole aria-label="Locked folder" className="absolute -left-1 -top-1 size-2.5" />}{collapsed && <span className="absolute -right-1.5 -top-1.5"><SharingBadges sharing={item.sharing} compact /></span>}</span>
             {!collapsed && <span className="truncate">{item.name}</span>}
+            {!collapsed && <SharingBadges sharing={item.sharing} />}
           </ContextMenuTrigger>
         </Hint>
         <ContextMenuContent side="right">

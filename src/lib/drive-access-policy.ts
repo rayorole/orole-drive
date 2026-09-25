@@ -1,5 +1,5 @@
 import { DriveError, LockedFolderError } from "./drive-errors";
-import type { DriveAccessMode, DrivePermission, ShareMember } from "./drive-types";
+import type { DriveAccessMode, DrivePermission, DriveSharingStatus, ShareMember } from "./drive-types";
 
 export interface DriveAccessNode {
   id: string;
@@ -16,6 +16,8 @@ export interface DriveAccessNode {
   accessMode: DriveAccessMode;
   memberRole: "viewer" | "editor";
   selectedRole: "viewer" | "editor" | null;
+  hasActivePublicLink: boolean;
+  hasSharedMembers: boolean;
 }
 
 export interface DriveAccessFlags {
@@ -24,6 +26,7 @@ export interface DriveAccessFlags {
   isProtected: boolean;
   owner: ShareMember | null;
   permission: DrivePermission;
+  sharing: DriveSharingStatus;
   /** An inaccessible parent must not be disclosed or used as a navigation target. */
   parentId: string | null;
 }
@@ -68,6 +71,44 @@ function itemPermission(path: readonly DriveAccessNode[], userId: string, start 
   return null;
 }
 
+/** Describe audiences, not this session's role; ownership must not hide inherited sharing. */
+function sharingStatus(path: readonly DriveAccessNode[]): DriveSharingStatus {
+  const sharing: DriveSharingStatus = { public: null, members: null, membersInherited: false };
+  if (path.some((node) => node.trashed || node.deleting) || path[0].state !== "complete") return sharing;
+  if (!path.some((node) => node.hasPassword)) {
+    for (let index = 0; index < path.length; index += 1) {
+      const node = path[index];
+      if (!node.ownerId) break;
+      if (node.hasActivePublicLink) {
+        sharing.public = index === 0 ? "direct" : "inherited";
+        break;
+      }
+      if (node.accessMode !== "inherit") break;
+    }
+  }
+  let sharedWithAncestorOwner = false;
+  for (let index = 0; index < path.length; index += 1) {
+    const node = path[index];
+    if (!node.ownerId) break;
+    if (index > 0 && node.ownerId !== path[0].ownerId) sharedWithAncestorOwner = true;
+    if (node.accessMode === "members") {
+      sharing.members = "all";
+      sharing.membersInherited = index > 0;
+      break;
+    }
+    if (node.accessMode !== "inherit") {
+      sharing.members = (node.accessMode === "selected" && node.hasSharedMembers) || sharedWithAncestorOwner ? "selected" : null;
+      sharing.membersInherited = sharing.members !== null && index > 0;
+      break;
+    }
+  }
+  if (!sharing.members && sharedWithAncestorOwner) {
+    sharing.members = "selected";
+    sharing.membersInherited = true;
+  }
+  return sharing;
+}
+
 export function evaluateItemAccess(
   nodes: ReadonlyMap<string, DriveAccessNode>,
   id: string,
@@ -101,6 +142,7 @@ export function evaluateItemAccess(
     isProtected,
     owner: item.owner,
     permission,
+    sharing: sharingStatus(path),
     parentId: path.length > 1 && itemPermission(path, userId, 1) ? item.parentId : null,
   };
 }

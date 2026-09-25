@@ -40,7 +40,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
       </main>
       <footer className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 px-5 py-6 text-center text-xs text-muted-foreground">
         <LockKeyhole className="size-3.5" aria-hidden="true" />
-        <p>Private to @orole.be. Public only when you share a link.</p>
+        <p>Private to approved members. Public only when you share a link.</p>
       </footer>
     </div>
   );

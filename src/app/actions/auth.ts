@@ -28,7 +28,7 @@ function authError(error: unknown): { success: false; error: string } {
 
 export async function requestCode(rawEmail: string): Promise<ActionResult<void>> {
   const email = normalizeFamilyEmail(rawEmail);
-  if (!email) return { success: false, error: "Use your @orole.be email address to sign in." };
+  if (!email) return { success: false, error: "Use an email address from an approved domain to sign in." };
   try {
     const auth = getAuth();
     await consumeAuthAttempt(email, "send");
@@ -44,7 +44,7 @@ export async function requestCode(rawEmail: string): Promise<ActionResult<void>>
 
 export async function verifyCode(rawEmail: string, rawCode: string, oauthQuery = ""): Promise<ActionResult<{ redirectUrl?: string }>> {
   const email = normalizeFamilyEmail(rawEmail);
-  if (!email) return { success: false, error: "Use your @orole.be email address to sign in." };
+  if (!email) return { success: false, error: "Use an email address from an approved domain to sign in." };
   const code = typeof rawCode === "string" ? rawCode.trim() : "";
   if (!/^\d{6}$/.test(code)) return { success: false, error: "Enter the six-digit code from your email." };
   try {

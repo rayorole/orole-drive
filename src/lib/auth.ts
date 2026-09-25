@@ -46,6 +46,12 @@ export const getAuth = cache(() => {
     disabledPaths: ["/token"],
     hooks: {
       before: createAuthMiddleware(async (ctx) => {
+        // Reject raw OTP requests before storage/delivery; delivery callbacks can run in the background.
+        if (ctx.path === "/email-otp/send-verification-otp" || ctx.path === "/sign-in/email-otp") {
+          const email = normalizeFamilyEmail(ctx.body?.email);
+          if (!email) throw new APIError("FORBIDDEN", { message: "Sign in with an approved email address." });
+          ctx.body.email = email;
+        }
         // Client registration capabilities are not a default authorization grant.
         if (ctx.path === "/oauth2/authorize") {
           const params = ctx.method === "POST" ? ctx.body : ctx.query;
@@ -76,7 +82,7 @@ export const getAuth = cache(() => {
           before: async (user) => {
             const email = normalizeFamilyEmail(user.email);
             if (!email || !user.emailVerified) {
-              throw new APIError("FORBIDDEN", { message: "A verified @orole.be email is required." });
+              throw new APIError("FORBIDDEN", { message: "A verified email from an approved domain is required." });
             }
             return { data: { ...user, email } };
           },
@@ -85,7 +91,7 @@ export const getAuth = cache(() => {
           before: async (user) => {
             if (user.email === undefined) return;
             const email = normalizeFamilyEmail(user.email);
-            if (!email) throw new APIError("FORBIDDEN", { message: "An @orole.be email is required." });
+            if (!email) throw new APIError("FORBIDDEN", { message: "An email from an approved domain is required." });
             return { data: { ...user, email } };
           },
         },
@@ -103,7 +109,7 @@ export const getAuth = cache(() => {
         async sendVerificationOTP({ email: rawEmail, otp, type }) {
           const email = normalizeFamilyEmail(rawEmail);
           if (!email || type !== "sign-in") {
-            throw new APIError("FORBIDDEN", { message: "Sign in with your @orole.be email." });
+            throw new APIError("FORBIDDEN", { message: "Sign in with an approved email address." });
           }
           const apiKey = process.env.RESEND_API_KEY;
           const from = process.env.RESEND_FROM;

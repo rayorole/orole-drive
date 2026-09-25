@@ -5,7 +5,7 @@ import { and, eq, gt, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { z } from "zod";
 import { FamilyAuthError, requireFamily } from "@/lib/auth";
-import { isVerifiedFamilyUser } from "@/lib/auth-policy";
+import { EMAIL_DOMAIN_WHITELIST, isVerifiedFamilyUser } from "@/lib/auth-policy";
 import { session, user } from "@/lib/auth-schema";
 import { getDb } from "@/lib/db";
 import type { Database, DriveTransaction } from "@/lib/db";
@@ -152,6 +152,8 @@ async function loadAccessNodes(
       ancestor.password_hash is not null as "hasPassword",
       ${currentGrant} as unlocked,
       ancestor.owner_id as "ownerId", ancestor.access_mode as "accessMode", ancestor.member_role as "memberRole",
+      (ancestor.public_token is not null and (ancestor.public_expires_at is null or ancestor.public_expires_at > clock_timestamp())) as "hasActivePublicLink",
+      exists (select 1 from drive_item_members audience where audience.item_id = ancestor.id and audience.user_id <> ancestor.owner_id) as "hasSharedMembers",
       case when owner.id is null then null else json_build_object('id', owner.id, 'name', owner.name, 'email', owner.email) end as owner,
       (select membership.role from drive_item_members membership
         where membership.item_id = ancestor.id and membership.user_id = ${ctx?.userId ?? null}) as "selectedRole"
@@ -294,7 +296,7 @@ function visibleItemIds(ctx: DriveContext, options: VisibleItemsOptions): SQL {
       select 1 from auth_session active_session join auth_user member on member.id = active_session.user_id
       where active_session.id = ${ctx.sessionId} and active_session.user_id = ${ctx.userId}
         and active_session.expires_at > clock_timestamp() and member.email = ${ctx.email}
-        and member.email_verified and split_part(lower(trim(member.email)), '@', 2) = 'orole.be'
+        and member.email_verified and split_part(lower(trim(member.email)), '@', 2) in (${sql.join(EMAIL_DOMAIN_WHITELIST.map((domain) => sql`${domain}`), sql`, `)})
     )
   `;
 }

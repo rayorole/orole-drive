@@ -8,6 +8,7 @@ function folder(id: string, parentId: string | null, overrides: Partial<DriveAcc
   return {
     id, name: id, parentId, kind: "folder", state: "complete", trashed: false, deleting: false,
     hasPassword: false, unlocked: false, ownerId: "owner", owner: { id: "owner", name: "Owner", email: "owner@orole.be" },
+    hasActivePublicLink: false, hasSharedMembers: false,
     accessMode: parentId ? "inherit" : "private", memberRole: "viewer", selectedRole: null, ...overrides,
   };
 }
@@ -148,4 +149,43 @@ test("a public token cannot bypass unknown ownership, pending state, ancestor pa
   item.ownerId = "owner";
   item.state = "pending";
   assert.throws(() => evaluatePublicItemAccess(tree, "item"), DriveError);
+});
+
+test("sharing indicators describe audiences independently of the owner's role", () => {
+  const root = folder("root", null, { accessMode: "members", hasActivePublicLink: true });
+  const tree = nodes(root, folder("child", "root"));
+  assert.deepEqual(evaluateItemAccess(tree, "root", "owner").sharing, { public: "direct", members: "all", membersInherited: false });
+  assert.deepEqual(evaluateItemAccess(tree, "child", "owner").sharing, { public: "inherited", members: "all", membersInherited: true });
+});
+
+test("explicit child access stops public and member sharing indicators from ancestors", () => {
+  const child = folder("child", "root", { accessMode: "private" });
+  const tree = nodes(folder("root", null, { accessMode: "members", hasActivePublicLink: true }), child);
+  assert.deepEqual(evaluateItemAccess(tree, "child", "owner").sharing, { public: null, members: null, membersInherited: false });
+  child.accessMode = "selected";
+  child.hasSharedMembers = true;
+  assert.deepEqual(evaluateItemAccess(tree, "child", "owner").sharing, { public: null, members: "selected", membersInherited: false });
+  child.hasActivePublicLink = true;
+  assert.equal(evaluateItemAccess(tree, "child", "owner").sharing.public, "direct");
+});
+
+test("expired links, empty selections, protected and trashed items have no misleading public badge", () => {
+  const item = folder("item", null, { accessMode: "selected" });
+  const tree = nodes(item);
+  assert.deepEqual(evaluateItemAccess(tree, "item", "owner").sharing, { public: null, members: null, membersInherited: false });
+  item.hasActivePublicLink = true;
+  item.hasPassword = true;
+  item.unlocked = true;
+  assert.equal(evaluateItemAccess(tree, "item", "owner").sharing.public, null);
+  item.hasPassword = false;
+  item.trashed = true;
+  assert.equal(evaluateItemAccess(tree, "item", "owner", { allowTrashed: true }).sharing.public, null);
+});
+
+test("another uploader's inherited item is shared with its ancestor owner", () => {
+  const child = folder("child", "root", { ownerId: "uploader" });
+  const tree = nodes(folder("root", null), child);
+  assert.deepEqual(evaluateItemAccess(tree, "child", "uploader").sharing, { public: null, members: "selected", membersInherited: true });
+  child.accessMode = "private";
+  assert.equal(evaluateItemAccess(tree, "child", "uploader").sharing.members, null);
 });
