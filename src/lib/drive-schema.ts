@@ -23,6 +23,7 @@ export const driveItems = pgTable(
     description: varchar("description", { length: 2_000 }).notNull().default(""),
     tags: text("tags").array().notNull().default(sql`'{}'::text[]`),
     folderColor: text("folder_color", { enum: ["blue", "green", "amber", "red", "violet", "gray"] }),
+    folderEmoji: varchar("folder_emoji", { length: 64 }),
     kind: text("kind", { enum: ["file", "folder"] }).notNull(),
     parentId: uuid("parent_id").references((): AnyPgColumn => driveItems.id, {
       onDelete: "restrict",
@@ -43,8 +44,11 @@ export const driveItems = pgTable(
     passwordVersion: uuid("password_version"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-    /** Member who uploaded, created or copied this item; null for items created before ownership was tracked. */
+    /** Member responsible for the current bytes (quota attribution), not the immutable owner. */
     createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    ownerId: text("owner_id").references(() => user.id, { onDelete: "set null" }),
+    accessMode: text("access_mode", { enum: ["private", "inherit", "members", "selected"] }).notNull().default("private"),
+    memberRole: text("member_role", { enum: ["viewer", "editor"] }).notNull().default("viewer"),
     /**
      * Pending uploads only: the complete file this upload becomes a new version of.
      * Its object key lives under the replaced file's id so it can be promoted without copying bytes.
@@ -54,6 +58,9 @@ export const driveItems = pgTable(
   (table) => [
     index("drive_items_parent_state_idx").on(table.parentId, table.state),
     index("drive_items_created_by_idx").on(table.createdBy),
+    index("drive_items_owner_idx").on(table.ownerId),
+    check("drive_items_access_mode_valid", sql`${table.accessMode} in ('private', 'inherit', 'members', 'selected')`),
+    check("drive_items_member_role_valid", sql`${table.memberRole} in ('viewer', 'editor')`),
     index("drive_items_replaces_idx").on(table.replacesId),
     check("drive_items_replaces_pending_file", sql`${table.replacesId} is null or (${table.kind} = 'file' and ${table.state} = 'pending' and ${table.replacesId} <> ${table.id})`),
     index("drive_items_state_updated_idx").on(table.state, table.updatedAt),
@@ -61,6 +68,7 @@ export const driveItems = pgTable(
     check("drive_items_folder_color_valid", sql`${table.folderColor} is null or (
       ${table.kind} = 'folder' and ${table.folderColor} in ('blue', 'green', 'amber', 'red', 'violet', 'gray')
     )`),
+    check("drive_items_folder_emoji_valid", sql`${table.folderEmoji} is null or (${table.kind} = 'folder' and char_length(${table.folderEmoji}) between 1 and 64)`),
     check("drive_items_password_folder_only", sql`${table.passwordHash} is null or ${table.kind} = 'folder'`),
     check("drive_items_password_version_pair", sql`(
       ${table.passwordHash} is null and ${table.passwordVersion} is null
@@ -90,6 +98,16 @@ export const driveItems = pgTable(
 
 export type DriveRow = typeof driveItems.$inferSelect;
 
+export const driveItemMembers = pgTable("drive_item_members", {
+  itemId: uuid("item_id").notNull().references(() => driveItems.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  role: text("role", { enum: ["viewer", "editor"] }).notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.itemId, table.userId] }),
+  index("drive_item_members_user_idx").on(table.userId),
+  check("drive_item_members_role_valid", sql`${table.role} in ('viewer', 'editor')`),
+]);
+
 export const driveFolderUnlocks = pgTable("drive_folder_unlocks", {
   sessionId: text("session_id").notNull().references(() => session.id, { onDelete: "cascade" }),
   folderId: uuid("folder_id").notNull().references(() => driveItems.id, { onDelete: "cascade" }),
@@ -101,6 +119,14 @@ export const driveFolderUnlocks = pgTable("drive_folder_unlocks", {
 ]);
 
 export const driveFavorites = pgTable("drive_favorites", {
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  itemId: uuid("item_id").notNull().references(() => driveItems.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  primaryKey({ columns: [table.userId, table.itemId] }),
+]);
+
+export const drivePinnedFolders = pgTable("drive_pinned_folders", {
   userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
   itemId: uuid("item_id").notNull().references(() => driveItems.id, { onDelete: "cascade" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

@@ -1,6 +1,6 @@
 import "server-only";
 
-import type { DriveContext } from "@/lib/drive-access";
+import { visibleItemsCondition, type DriveContext } from "@/lib/drive-access";
 import type { DriveTransaction } from "@/lib/db";
 import type { StorageQuota } from "@/lib/drive-types";
 import { sql } from "drizzle-orm";
@@ -29,12 +29,30 @@ export function memberQuotaBytes(): number {
   return quotaFromEnv("DRIVE_MEMBER_QUOTA_BYTES", DEFAULT_MEMBER_QUOTA_BYTES);
 }
 
-/**
- * Bytes held in storage: current file contents (including Trash and uploads still in progress, which
- * reserve their size up front) plus kept versions. Member usage counts what that member added;
- * items from before ownership was tracked count only toward the drive total.
- */
-export async function storageUsage(tx: DriveTransaction, userId: string): Promise<StorageQuota> {
+/** Usage visible under the current ACL, not a disclosure of other members' private storage. */
+export async function storageUsage(tx: DriveTransaction, ctx: DriveContext): Promise<StorageQuota> {
+  const [row] = await tx.execute<{ used: string; member_used: string }>(sql`
+    with readable_items as (
+      select id, size, created_by from drive_items
+      where kind = 'file' and ${visibleItemsCondition(ctx, { trash: true, includePending: true })}
+    ), readable_bytes as (
+      select size, created_by from readable_items
+      union all
+      select version.size, version.created_by from drive_file_versions version
+      join readable_items item on item.id = version.item_id
+    )
+    select coalesce(sum(size), 0) as used,
+      coalesce(sum(size) filter (where created_by = ${ctx.userId}), 0) as member_used
+    from readable_bytes
+  `);
+  return {
+    usedBytes: Number(row.used), quotaBytes: storageQuotaBytes(),
+    memberUsedBytes: Number(row.member_used), memberQuotaBytes: memberQuotaBytes(),
+  };
+}
+
+/** Quota enforcement counts every stored byte, including inaccessible items and retained versions. */
+async function reservedStorageUsage(tx: DriveTransaction, userId: string): Promise<StorageQuota> {
   const [row] = await tx.execute<{ used: string; member_used: string }>(sql`
     select
       (select coalesce(sum(size), 0) from drive_items where kind = 'file')
@@ -54,11 +72,11 @@ export async function storageUsage(tx: DriveTransaction, userId: string): Promis
  */
 export async function assertQuota(tx: DriveTransaction, ctx: DriveContext, bytes: number): Promise<void> {
   if (bytes <= 0) return;
-  const usage = await storageUsage(tx, ctx.userId);
+  const usage = await reservedStorageUsage(tx, ctx.userId);
   if (usage.usedBytes + bytes > usage.quotaBytes) {
-    throw new DriveError(`The drive is full: ${formatBytes(Math.max(0, usage.quotaBytes - usage.usedBytes))} of ${formatBytes(usage.quotaBytes)} left, ${formatBytes(bytes)} needed. Empty Trash or delete old versions to make room.`);
+    throw new DriveError("The drive does not have enough storage for this upload. Empty Trash or delete old versions to make room.");
   }
   if (usage.memberUsedBytes + bytes > usage.memberQuotaBytes) {
-    throw new DriveError(`You’ve reached your storage limit: ${formatBytes(Math.max(0, usage.memberQuotaBytes - usage.memberUsedBytes))} of ${formatBytes(usage.memberQuotaBytes)} left, ${formatBytes(bytes)} needed. Empty Trash or delete old versions to make room.`);
+    throw new DriveError(`You’ve reached your storage limit of ${formatBytes(usage.memberQuotaBytes)}. Empty Trash or delete old versions to make room.`);
   }
 }

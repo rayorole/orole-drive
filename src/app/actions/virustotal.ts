@@ -90,9 +90,9 @@ export async function getFileScanStatus(id: string): Promise<ActionResult<FileSc
     const fileId = idSchema.parse(id);
     return withDriveTransaction("write", async (tx) => {
       const row = await loadScannableFile(tx, fileId);
-      await assertItemAccess(tx, ctx, row);
+      await assertItemAccess(tx, ctx, row, { permission: "read" });
       const scan = await ensureScan(tx, row);
-      return toStatus(scan, row.size);
+      return toStatus(scan, row.size, row.ownerId === ctx.userId);
     });
   }, "read");
 }
@@ -103,7 +103,7 @@ export async function submitFileScan(id: string, consent: boolean): Promise<Acti
     if (consent !== true) throw new DriveError("Confirm that VirusTotal may distribute this file to its security partners before submitting.");
     const row = await withDriveTransaction("read", async (tx) => {
       const item = await loadScannableFile(tx, fileId);
-      await assertItemAccess(tx, ctx, item);
+      await assertItemAccess(tx, ctx, item, { permission: "manage" });
       return item;
     });
     if (!virusTotalApiKey()) throw new DriveError("Virus scanning isn’t set up on this drive.");
@@ -112,13 +112,17 @@ export async function submitFileScan(id: string, consent: boolean): Promise<Acti
       throw new DriveError("VirusTotal submissions are limited to 650 MB. This file was not downloaded or sent.");
     }
     const cached = await withDriveTransaction("read", async (tx) => {
+      const current = await loadScannableFile(tx, row.id);
+      await assertItemAccess(tx, ctx, current, { permission: "manage" });
       const [scan] = await tx.select().from(driveVirusScans).where(eq(driveVirusScans.itemId, row.id)).limit(1);
       return scan;
     });
     if (cached && cached.status !== "unknown") return toStatus(cached, row.size);
     // The upload runs after this response; the drive shows the file as scanning until VirusTotal answers.
-    if (!(await queueScanSubmission(row))) throw new DriveError("VirusTotal could not accept this file right now. Try again in a moment.");
+    if (!(await queueScanSubmission(row, ctx))) throw new DriveError("VirusTotal could not accept this file right now. Try again in a moment.");
     return withDriveTransaction("read", async (tx) => {
+      const current = await loadScannableFile(tx, row.id);
+      await assertItemAccess(tx, ctx, current, { permission: "manage" });
       const [scan] = await tx.select().from(driveVirusScans).where(eq(driveVirusScans.itemId, row.id)).limit(1);
       return toStatus(scan ?? null, row.size);
     });

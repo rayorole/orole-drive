@@ -25,6 +25,19 @@ test("safe media types retain their native preview and thumbnails stay bounded",
   assert.equal(canThumbnail({ ...image, name: "active.svg" }), false);
 });
 
+test("Office detection recognizes modern formats without promoting legacy or active documents", () => {
+  for (const extension of ["docx", "xlsx", "pptx"]) {
+    assert.equal(getPreviewKind({ name: `Document.${extension.toUpperCase()}`, mimeType: "application/octet-stream", kind: "file" }), extension);
+    assert.equal(getPreviewKind({ name: `Document.${extension}`, mimeType: "image/svg+xml", kind: "file" }), "text");
+  }
+  assert.equal(getPreviewKind({ name: "document", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", kind: "file" }), "docx");
+  assert.equal(getPreviewKind({ name: "page.html", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", kind: "file" }), "text");
+  for (const extension of ["doc", "xls", "ppt", "docm", "xlsm", "pptm"]) {
+    assert.equal(getPreviewKind({ name: `Document.${extension}`, mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", kind: "file" }), null);
+  }
+  assert.equal(getPreviewKind({ name: "Folder.xlsx", mimeType: null, kind: "folder" }), null);
+});
+
 test("text preview preserves HTML as text and handles byte-order-mark UTF-16", async () => {
   const source = '<svg onload="alert(1)"><script>alert(2)</script></svg>';
   const preview = await readTextPreview(`data:text/plain;base64,${Buffer.from(source).toString("base64")}`, new AbortController().signal);

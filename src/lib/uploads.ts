@@ -8,7 +8,7 @@ import { after } from "next/server";
 import { and, eq, isNull } from "drizzle-orm";
 import { recordEvents } from "@/lib/activity";
 import { numberedName } from "@/lib/copy-name";
-import { assertCapability, assertItemAccess, assertItemsAccess, getItemAccess, withDriveTransaction } from "@/lib/drive-access";
+import { assertCapability, assertItemAccess, assertItemsAccess, getItemAccess, visibleItemsCondition, withDriveTransaction } from "@/lib/drive-access";
 import { DriveError, NameConflictError } from "@/lib/drive-errors";
 import { driveActivity, driveItems } from "@/lib/drive-schema";
 import { folderPath, MAX_FOLDER_DEPTH } from "@/lib/drive-tree";
@@ -25,11 +25,17 @@ export async function itemData(tx: DriveTransaction, ctx: DriveContext, row: Dri
 }
 
 /** The destination's folder path, once this session may add to it. */
-export async function uploadDestination(tx: DriveTransaction, ctx: DriveContext, parentId: string | null): Promise<DriveRow[]> {
+export async function uploadDestination(tx: DriveTransaction, ctx: DriveContext, parentId: string | null, options: { allowTrashed?: boolean } = {}): Promise<DriveRow[]> {
   const path = await folderPath(tx, parentId);
-  if (path.length) await assertItemAccess(tx, ctx, path[path.length - 1]);
-  else await assertItemsAccess(tx, ctx, []);
+  if (path.length) await assertItemAccess(tx, ctx, path[path.length - 1], { ...options, permission: "write" });
+  else await assertItemsAccess(tx, ctx, [], { permission: "write" });
   return path;
+}
+
+/** Owning a pending upload does not preserve permission to write into a destination after its sharing changes. */
+export async function assertUploadAccess(tx: DriveTransaction, ctx: DriveContext, row: DriveRow, options: { allowTrashed?: boolean } = {}): Promise<void> {
+  await assertItemAccess(tx, ctx, row, { ...options, permission: "write" });
+  await uploadDestination(tx, ctx, row.parentId, options);
 }
 
 type Incoming = { key: string; name: string; kind: "file" | "folder" };
@@ -47,7 +53,8 @@ async function placeIncoming(tx: DriveTransaction, ctx: DriveContext, incoming: 
   if (!resolution) throw new NameConflictError([conflict]);
   if (resolution === "keep-both") {
     const uploading = await tx.select({ name: driveItems.name }).from(driveItems).where(and(
-      parentId ? eq(driveItems.parentId, parentId) : isNull(driveItems.parentId),
+      parentId ? eq(driveItems.parentId, parentId) : and(isNull(driveItems.parentId), eq(driveItems.ownerId, ctx.userId)),
+      visibleItemsCondition(ctx, { permission: "write", includePending: true }),
       eq(driveItems.state, "pending"),
       isNull(driveItems.trashedAt),
     ));
@@ -55,6 +62,9 @@ async function placeIncoming(tx: DriveTransaction, ctx: DriveContext, incoming: 
     return { name: numberedName(incoming.name, incoming.kind, taken), replacesId: null, trashedUploadIds: [] };
   }
   if (incoming.kind === "file" && conflict.existingKind === "file") {
+    const [file] = await tx.select().from(driveItems).where(eq(driveItems.id, conflict.existingId));
+    if (!file) throw new DriveError("This file is no longer available.");
+    await assertUploadAccess(tx, ctx, file);
     // The file keeps its own name; only its content changes.
     return { name: siblings.get(incoming.name.toLowerCase())?.name ?? incoming.name, replacesId: conflict.existingId, trashedUploadIds: [] };
   }
@@ -69,7 +79,7 @@ export async function startUpload(ctx: DriveContext, request: UploadRequest): Pr
   let multipartRow: DriveRow | undefined;
   const { ticket, trashedUploadIds } = await withDriveTransaction("write", async (tx) => {
     await uploadDestination(tx, ctx, request.parentId);
-    const siblings = await destinationSiblings(tx, request.parentId);
+    const siblings = await destinationSiblings(tx, ctx, request.parentId);
     const placement = await placeIncoming(tx, ctx, { key: request.key, name: request.name, kind: "file" }, request.parentId, siblings, request.resolution);
     await assertQuota(tx, ctx, request.size);
     const id = randomUUID();
@@ -77,6 +87,7 @@ export async function startUpload(ctx: DriveContext, request: UploadRequest): Pr
       id, name: placement.name, size: request.size, mimeType: request.mimeType, parentId: request.parentId, kind: "file", state: "pending",
       // A replacement stores its bytes under the file it becomes a version of, so completion only swaps keys.
       objectKey: createObjectKey(placement.replacesId ?? id), replacesId: placement.replacesId, createdBy: ctx.userId,
+      ownerId: ctx.userId, accessMode: request.parentId ? "inherit" : "private",
     }).returning();
     if (request.size < MULTIPART_THRESHOLD_BYTES) return { ticket: await signUpload(row), trashedUploadIds: placement.trashedUploadIds };
     const multipartUploadId = await createMultipartUpload(row);
@@ -101,7 +112,7 @@ async function completeReplacement(tx: DriveTransaction, ctx: DriveContext, row:
     await tx.delete(driveItems).where(eq(driveItems.id, row.id));
     return null;
   }
-  await assertItemAccess(tx, ctx, file);
+  await assertUploadAccess(tx, ctx, file);
   const etag = await commitUpload(row);
   // Frees the object key the file takes over.
   await tx.delete(driveItems).where(eq(driveItems.id, row.id));
@@ -117,7 +128,7 @@ export async function finishUpload(ctx: DriveContext, id: string): Promise<Drive
   const result = await withDriveTransaction("write", async (tx): Promise<Completion | null> => {
     const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id)).for("update");
     if (!row || row.kind !== "file") throw new DriveError("This upload is no longer available.");
-    await assertItemAccess(tx, ctx, row);
+    await assertUploadAccess(tx, ctx, row);
     if (row.state === "complete") return { staged: row, item: await itemData(tx, ctx, row), replaced: null };
     if (row.replacesId) return completeReplacement(tx, ctx, row, row.replacesId);
     const etag = await commitUpload(row);
@@ -142,7 +153,7 @@ export async function cancelPendingUpload(ctx: DriveContext, id: string): Promis
     const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id)).for("update");
     if (!row) return;
     if (row.kind !== "file" || row.state !== "pending") throw new DriveError("This upload has already completed. Move the file to Trash instead.");
-    await assertItemAccess(tx, ctx, row, { allowTrashed: true });
+    await assertUploadAccess(tx, ctx, row, { allowTrashed: true });
     await removeObject(row);
     await tx.delete(driveItems).where(eq(driveItems.id, id));
   });
@@ -155,17 +166,18 @@ export async function cancelPendingUpload(ctx: DriveContext, id: string): Promis
 export async function ensureUploadFolder(ctx: DriveContext, request: { key: string; name: string; parentId: string | null; resolution?: UploadResolution }): Promise<{ folder: DriveItem; created: boolean }> {
   const { result, trashedUploadIds } = await withDriveTransaction("write", async (tx) => {
     const path = await uploadDestination(tx, ctx, request.parentId);
-    const siblings = await destinationSiblings(tx, request.parentId);
+    const siblings = await destinationSiblings(tx, ctx, request.parentId);
     const existing = siblings.get(request.name.toLowerCase());
     if (existing?.kind === "folder") {
       const [folder] = await tx.select().from(driveItems).where(eq(driveItems.id, existing.id));
-      await assertItemAccess(tx, ctx, folder);
+      await assertItemAccess(tx, ctx, folder, { permission: "write" });
       return { result: { folder: await itemData(tx, ctx, folder), created: false }, trashedUploadIds: [] };
     }
     if (path.length >= MAX_FOLDER_DEPTH) throw new DriveError("Folders can be nested up to 64 levels deep.");
     const placement = await placeIncoming(tx, ctx, { key: request.key, name: request.name, kind: "folder" }, request.parentId, siblings, request.resolution);
     const [folder] = await tx.insert(driveItems).values({
       id: randomUUID(), name: placement.name, parentId: request.parentId, kind: "folder", state: "complete", size: 0, createdBy: ctx.userId,
+      ownerId: ctx.userId, accessMode: request.parentId ? "inherit" : "private",
     }).returning();
     await recordEvents(tx, ctx, [{ action: "create_folder", item: { id: folder.id, name: folder.name, kind: "folder", parentId: folder.parentId } }]);
     return { result: { folder: await itemData(tx, ctx, folder), created: true }, trashedUploadIds: placement.trashedUploadIds };

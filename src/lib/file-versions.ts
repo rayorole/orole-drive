@@ -22,8 +22,9 @@ export type ContentReplacement = { file: DriveRow; version: DriveFileVersionRow;
 /**
  * Makes `content` the file's current content inside the caller's write transaction; the previous content becomes a
  * version. `createdBy` follows the content, so each version names who uploaded it and its bytes count toward that
- * member's storage. Scan results and risk scores described the old bytes and are dropped. No drive_items row may
- * still hold `content.objectKey`. Pass the result to `afterContentChange` once the transaction commits.
+ * member's storage. Ownership and sharing belong to the file and never follow the content. Scan results and risk
+ * scores described the old bytes and are dropped. No drive_items row may still hold `content.objectKey`.
+ * Pass the result to `afterContentChange` once the transaction commits.
  */
 export async function replaceFileContent(tx: DriveTransaction, file: DriveRow, content: FileContent): Promise<ContentReplacement> {
   if (file.kind !== "file" || file.state !== "complete" || !file.objectKey || !file.mimeType || !file.etag) {

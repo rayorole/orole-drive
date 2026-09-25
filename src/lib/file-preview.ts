@@ -1,6 +1,17 @@
 import type { DriveItem } from "@/lib/drive-types";
 
-export type PreviewKind = "image" | "video" | "audio" | "pdf" | "text";
+export type OfficeKind = "docx" | "xlsx" | "pptx";
+export type PreviewKind = "image" | "video" | "audio" | "pdf" | "text" | OfficeKind;
+
+export function isOfficeKind(kind: PreviewKind | null): kind is OfficeKind {
+  return kind === "docx" || kind === "xlsx" || kind === "pptx";
+}
+
+const officeTypes: Record<string, OfficeKind> = {
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+};
 
 const mediaTypes: Record<string, PreviewKind> = {
   "image/jpeg": "image", "image/png": "image", "image/gif": "image", "image/webp": "image", "image/avif": "image", "image/bmp": "image",
@@ -31,8 +42,12 @@ export function getPreviewKind(item: Pick<DriveItem, "name" | "mimeType" | "kind
   const name = item.name.toLowerCase();
   // Active document formats are source text, even when given a misleading media MIME type.
   if (/\.(?:svg|html?|xhtml)$/.test(name) || mime.startsWith("text/") || textTypes[mime] === true || /^application\/[\w.+-]+\+(?:json|xml)$/.test(mime)) return "text";
-  if (Object.hasOwn(mediaTypes, mime)) return mediaTypes[mime];
   const extension = name.slice(name.lastIndexOf(".") + 1);
+  // Legacy and macro-enabled Office formats remain download-only, even with a misleading MIME.
+  if (/^(?:doc|xls|ppt|docm|xlsm|pptm|xltm|potm|xlsb)$/.test(extension)) return null;
+  if (extension === "docx" || extension === "xlsx" || extension === "pptx") return extension;
+  if (Object.hasOwn(officeTypes, mime)) return officeTypes[mime];
+  if (Object.hasOwn(mediaTypes, mime)) return mediaTypes[mime];
   return textExtensions[extension] === true || textNames[name] === true ? "text" : null;
 }
 

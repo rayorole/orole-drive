@@ -6,6 +6,8 @@ import {
   type DragEndEvent, type DragStartEvent, type Modifier,
 } from "@dnd-kit/core";
 import { cn } from "@/lib/utils";
+import type { DrivePermission } from "@/lib/drive-types";
+import { canEditItem } from "@/lib/drive-permissions";
 
 export type DropTarget = { id: string | null; name: string };
 type DragData = { ids: string[] };
@@ -39,7 +41,7 @@ export function DriveDndProvider({ children, enabled, renderPreview, onMove }: {
     setDragging(null);
     const ids = (event.active.data.current as DragData | undefined)?.ids;
     const target = (event.over?.data.current as DropData | undefined)?.target;
-    if (!ids?.length || !target || ids.includes(target.id ?? "")) return;
+    if (!enabled || !ids?.length || !target || ids.includes(target.id ?? "")) return;
     onMove(ids, target);
   }
 
@@ -55,21 +57,23 @@ function useDraggingIds() {
 }
 
 /** Makes a drive row or card draggable and, for folders, a drop target. Spread `dragListeners` on the element. */
-export function useDriveItemDnd(item: { id: string; name: string; kind: "file" | "folder"; isLocked: boolean }, { enabled, dragIds }: {
+export function useDriveItemDnd(item: { id: string; name: string; kind: "file" | "folder"; isLocked: boolean; permission: DrivePermission }, { enabled, dragIds }: {
   enabled: boolean;
   dragIds: (id: string) => string[];
 }) {
   const dragging = useDraggingIds();
-  const draggable = useDraggable({ id: item.id, disabled: !enabled, data: { ids: enabled ? dragIds(item.id) : [] } satisfies DragData });
+  const ids = enabled && canEditItem(item) ? dragIds(item.id) : [];
+  const canDrag = enabled && ids.length > 0;
+  const draggable = useDraggable({ id: item.id, disabled: !canDrag, data: { ids } satisfies DragData });
   const droppable = useDroppable({
     id: `folder:${item.id}`,
-    disabled: !enabled || item.kind !== "folder" || item.isLocked || Boolean(dragging?.includes(item.id)),
+    disabled: !enabled || !canEditItem(item) || item.kind !== "folder" || item.isLocked || Boolean(dragging?.includes(item.id)),
     data: { target: { id: item.id, name: item.name } } satisfies DropData,
   });
   return {
     ref(node: HTMLElement | null) { draggable.setNodeRef(node); droppable.setNodeRef(node); },
     // Only the pointer listeners: dnd-kit's role/tabIndex attributes would break table row semantics.
-    dragListeners: enabled ? draggable.listeners : undefined,
+    dragListeners: canDrag ? draggable.listeners : undefined,
     isDragged: Boolean(dragging?.includes(item.id)),
     isOver: droppable.isOver,
   };

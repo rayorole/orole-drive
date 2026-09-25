@@ -57,6 +57,20 @@
       "when": 1790329897801,
       "tag": "0007_files_versions_activity",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1790333995007,
+      "tag": "0008_pinned_folders_emoji",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1790336945605,
+      "tag": "0009_owner_access",
+      "breakpoints": true
     }
   ]
 }

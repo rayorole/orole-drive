@@ -28,7 +28,7 @@ export function usageParts(usage: StorageUsageReport) {
   ].filter((part) => part.bytes > 0);
 }
 
-/** One colored slice per type, sized against the quota; the muted remainder is free space. */
+/** One colored slice per accessible type, sized against the configured drive quota. */
 export function UsageBar({ usage, total, className }: { usage: StorageUsageReport; total: number; className?: string }) {
   return <div className={cn("flex h-1.5 overflow-hidden rounded-full bg-foreground/15", className)} aria-hidden="true">
     {usageParts(usage).map((part) => <div key={part.key} className={cn("h-full shrink-0", SEGMENT_COLORS[part.key])} style={{ width: `${(part.bytes / total) * 100}%` }} />)}
@@ -74,9 +74,9 @@ function storageWarning(usage: StorageQuota) {
 export function StorageCard({ collapsed, onOpen }: { collapsed: boolean; onOpen: () => void }) {
   const { data: usage, isPending } = useStorageUsage();
   const percent = usage ? usagePercent(usage.usedBytes, usage.quotaBytes) : 0;
-  const status = isPending ? "Checking usage…" : usage ? `${formatBytes(usage.usedBytes)} of ${formatBytes(usage.quotaBytes)}` : "Usage unavailable";
+  const status = isPending ? "Checking usage…" : usage ? `${formatBytes(usage.usedBytes)} visible` : "Usage unavailable";
   const warning = usage && storageWarning(usage);
-  const summary = `${usage ? `${status} used (${percent}%)` : status}${warning ? `. ${warning.text}` : ""}`;
+  const summary = `${usage ? `${status}, ${percent}% of the configured drive limit. Private items are excluded` : status}${warning ? `. ${warning.text}` : ""}`;
   const label = `Storage: ${summary}. Show storage details`;
 
   if (collapsed) return <div className="flex justify-center"><Hint label={summary} side="right">
@@ -95,7 +95,7 @@ export function StorageCard({ collapsed, onOpen }: { collapsed: boolean; onOpen:
     {usage ? <UsageBar usage={usage} total={Math.max(usage.quotaBytes, usage.usedBytes)} /> : <span className="h-1.5 rounded-full bg-foreground/15" aria-hidden="true" />}
     {warning
       ? <span className="flex items-center gap-1 text-[11px] font-medium" aria-hidden="true"><TriangleAlert className="size-3 shrink-0" style={{ color: usageSeverity(warning.ratio).color }} />{warning.text}</span>
-      : usage && <span className="text-[11px] text-muted-foreground" aria-hidden="true">{usage.fileCount.toLocaleString()} {usage.fileCount === 1 ? "file" : "files"} · {percent}% used</span>}
+      : usage && <span className="text-[11px] text-muted-foreground" aria-hidden="true">{usage.fileCount.toLocaleString()} visible {usage.fileCount === 1 ? "file" : "files"} · {percent}% of limit</span>}
   </button>;
 }
 

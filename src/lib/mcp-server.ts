@@ -57,7 +57,7 @@ async function getDriveItemInfo(id: string): Promise<ActionResult<DriveItem>> {
   return driveAction(async (ctx) => withDriveTransaction("read", async (tx) => {
     const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id)).limit(1);
     if (!row || row.state !== "complete") throw new DriveError("This file or folder is no longer available.");
-    await assertItemAccess(tx, ctx, row);
+    await assertItemAccess(tx, ctx, row, { permission: "read" });
     return { ...toDriveItem(row), ...await getItemAccess(tx, ctx, row) };
   }), "read");
 }
@@ -314,7 +314,7 @@ export function createDriveMcpServer(actor: DriveActor): McpServer {
 
   server.registerTool("storage_summary", {
     title: "Storage summary",
-    description: "Returns bytes used against the drive's storage limit and your own limit, a breakdown by file type (current files) plus Trash, old versions and uploads in progress, usage per family member, and the largest files you can access. Sizes are in bytes.",
+    description: "Returns storage usage visible under your current item permissions, configured drive and member limits, a file-type breakdown plus accessible Trash, versions and pending uploads, usage by contributors, and the largest accessible files. Other private storage also counts toward enforced limits but is not disclosed. Sizes are in bytes.",
     inputSchema: z.object({}),
   }, async () => toolResult(await runWithDriveContext(actor, () => getStorageUsage())));
 

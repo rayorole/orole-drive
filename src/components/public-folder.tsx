@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useMutation } from "@tanstack/react-query";
-import { Archive, Check, ChevronRight, Download, File, FileImage, FileMusic, FileText, FileVideo, Folder, FolderOpen, Link2 } from "lucide-react";
+import { Archive, Check, ChevronRight, Download, File, FileImage, FileMusic, FileText, FileVideo, Folder, Link2 } from "lucide-react";
 import { toast } from "sonner";
 import { getPublicFolderArchive, getPublicFolderFileAccess } from "@/app/actions/public";
 import { useArchiveDownloader, type ArchiveSource } from "@/components/drive-archive";
@@ -12,8 +12,9 @@ import { Spinner } from "@/components/spinner";
 import type { ActionResult, PublicFolderView, PublicShareCrumb, PublicShareItem } from "@/lib/drive-types";
 import { getPreviewKind } from "@/lib/file-preview";
 import { formatBytes } from "@/lib/format-bytes";
+import { FolderIcon } from "@/components/folder-icon";
 
-const KIND_ICONS = { image: FileImage, video: FileVideo, audio: FileMusic, pdf: FileText, text: FileText } as const;
+const KIND_ICONS = { image: FileImage, video: FileVideo, audio: FileMusic, pdf: FileText, text: FileText, docx: FileText, xlsx: FileText, pptx: FileText } as const;
 
 function unwrap<T>(result: ActionResult<T>): T {
   if (!result.success) throw new Error(result.error);
@@ -39,10 +40,11 @@ export function PublicShareBreadcrumbs({ token, crumbs, current }: { token: stri
 }
 
 function ItemIcon({ item }: { item: PublicShareItem }) {
+  if (item.kind === "folder") return <FolderIcon item={item} />;
   const kind = getPreviewKind(item);
-  const Icon = item.kind === "folder" ? Folder : kind ? KIND_ICONS[kind] : File;
+  const Icon = kind ? KIND_ICONS[kind] : File;
   return <span aria-hidden="true" className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted/65 text-muted-foreground">
-    <Icon className={item.kind === "folder" ? "size-5 fill-primary/20 text-primary" : "size-5"} strokeWidth={1.6} />
+    <Icon className="size-5" strokeWidth={1.6} />
   </span>;
 }
 
@@ -76,7 +78,7 @@ export function PublicFolder({ token, view }: { token: string; view: PublicFolde
     <PublicShareBreadcrumbs token={token} crumbs={view.breadcrumbs} />
     <header className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
       <div className="flex min-w-0 items-start gap-4">
-        <span aria-hidden="true" className="flex size-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary"><FolderOpen className="size-6" strokeWidth={1.6} /></span>
+        <span className="flex size-12 shrink-0 items-center justify-center"><FolderIcon item={current} /></span>
         <div className="min-w-0">
           <h1 id="shared-folder-title" className="wrap-anywhere text-xl font-semibold tracking-[-0.02em] text-balance sm:text-2xl">{current.name}</h1>
           <dl className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">

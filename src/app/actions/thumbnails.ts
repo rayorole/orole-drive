@@ -16,7 +16,7 @@ export async function getThumbnailUrl(id: string): Promise<ActionResult<{ url: s
         eq(driveItems.id, id), eq(driveItems.kind, "file"), eq(driveItems.state, "complete"),
       )).limit(1);
       if (!row) throw new DriveError("This file is no longer available.");
-      await assertItemAccess(tx, context, row);
+      await assertItemAccess(tx, context, row, { permission: "read" });
       // Keep authorization and signing in the hierarchy read lock, including derivative generation.
       return { url: await getThumbnailForRow(row) };
     });

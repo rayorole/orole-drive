@@ -604,6 +604,7 @@ export function DriveUploadQueue({ uploads }: { uploads: DriveUploads }) {
         {!pending && <Button variant="ghost" size="icon-sm" aria-label="Dismiss upload queue" onClick={clearFinished}><X /></Button>}
       </div>
       {!collapsed && <div id="upload-jobs" className="max-h-72 overflow-y-auto border-t">
+        <p className="border-b px-4 py-3 text-xs text-muted-foreground">New items in All files are private. New items inside folders inherit that folder’s access, including public links. Replacing a file keeps its owner and access settings.</p>
         {interrupted.length > 0 && <div role="group" aria-labelledby="interrupted-uploads" className="border-b last:border-0">
           <p id="interrupted-uploads" className="px-4 pt-3 text-xs font-medium text-muted-foreground">Interrupted uploads</p>
           {interrupted.map((upload) => <div key={upload.id} className="flex items-start gap-3 px-4 py-3">

@@ -8,6 +8,7 @@ import { getDownloadUrl } from "@/app/actions/drive";
 import { deleteVersion, getVersionDownloadUrl, listVersions, restoreVersion } from "@/app/actions/versions";
 import type { DriveFileVersion, DriveItem } from "@/lib/drive-types";
 import { formatBytes } from "@/lib/format-bytes";
+import { canEditItem } from "@/lib/drive-permissions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -67,7 +68,7 @@ export function DriveVersionsDialog({ item, onClose }: { item: DriveItem; onClos
 
   return <Dialog open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
     <DialogContent showCloseButton={!busy} className="sm:max-w-lg">
-      <DialogHeader>
+      <DialogHeader className="pr-7">
         <div className="flex items-center gap-3">
           <DriveFileIcon item={item} />
           <div className="min-w-0"><DialogTitle className="truncate">{item.name}</DialogTitle><DialogDescription>Version history. Uploading a same-named file with Replace keeps the previous contents here, up to 20 versions.</DialogDescription></div>
@@ -84,7 +85,7 @@ export function DriveVersionsDialog({ item, onClose }: { item: DriveItem; onClos
                 <p className="truncate text-xs text-muted-foreground">{formatBytes(version.size)} · {version.createdByEmail ?? "Unknown member"}</p>
               </div>
               <Hint label="Download"><Button variant="ghost" size="icon-sm" aria-label={`Download the ${version.current ? "current version" : `version from ${date}`}`} disabled={download.isPending} onClick={() => download.mutate(version)}><Download /></Button></Hint>
-              {!version.current && <>
+              {!version.current && canEditItem(item) && <>
                 <Button variant="outline" size="sm" disabled={busy} onClick={() => restore.mutate(version)}>
                   {restore.isPending && restore.variables?.id === version.id ? <Spinner size={14} label="Restoring" /> : <RotateCcw data-icon="inline-start" />}Restore
                 </Button>
@@ -101,7 +102,7 @@ export function DriveVersionsDialog({ item, onClose }: { item: DriveItem; onClos
         <AlertDialogHeader>
           <AlertDialogTitle>Delete this version?</AlertDialogTitle>
           <AlertDialogDescription>
-            {deleting && `The version from ${dateFormat.format(new Date(deleting.createdAt))} (${formatBytes(deleting.size)}) is deleted for the whole family. This can’t be undone.`}
+            {deleting && `The version from ${dateFormat.format(new Date(deleting.createdAt))} (${formatBytes(deleting.size)}) is deleted for everyone with access. This can’t be undone.`}
           </AlertDialogDescription>
         </AlertDialogHeader>
         {remove.isError && <p role="alert" className="text-sm text-destructive">{remove.error.message}</p>}

@@ -1,7 +1,7 @@
 "use server";
 
 import type { SQL } from "drizzle-orm";
-import type { DriveContext, DriveTransaction } from "@/lib/drive-access";
+import type { DriveAccessOptions, DriveContext, DriveTransaction } from "@/lib/drive-access";
 import type { DriveRow } from "@/lib/drive-schema";
 import type { ActionResult, DriveArchiveManifest, DriveItem, DriveListInput, DriveListing, DriveRestoreResult, EmptyTrashResult, TrashSummary, UploadResolution, UploadTicket } from "@/lib/drive-types";
 import { randomUUID } from "node:crypto";
@@ -10,6 +10,7 @@ import { after as afterResponse } from "next/server";
 import { and, arrayContains, asc, desc, eq, gte, ilike, inArray, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import { assertItemAccess, assertItemsAccess, canAccessPublic, driveAction, getItemAccess, getItemsAccess, visibleItemsCondition, withDriveTransaction } from "@/lib/drive-access";
+import { discoverableRootsCondition, tryItemsAccess } from "@/lib/drive-access";
 import { DriveError } from "@/lib/drive-errors";
 import { driveFavorites, driveItems } from "@/lib/drive-schema";
 import { assertMoveDepth, childFirst, folderPath, loadTree, MAX_FOLDER_DEPTH, selectedRows } from "@/lib/drive-tree";
@@ -22,7 +23,7 @@ import { SIGNAL_LABELS, type FileRiskSignal } from "@/lib/file-risk-signals";
 import { prioritizeScans } from "@/lib/file-risk";
 import { driveFileRisks, driveVirusScans } from "@/lib/virustotal-schema";
 import { itemType } from "@/lib/item-type";
-import { assertCapability } from "@/lib/drive-access";
+import { assertCapability, defaultItemAccess } from "@/lib/drive-access";
 import type { DriveTree } from "@/lib/drive-tree";
 import type { ConflictResolutions, DriveCopyResult, DriveMoveResult } from "@/lib/drive-types";
 import { assertQuota } from "@/lib/quota";
@@ -40,17 +41,17 @@ async function itemData(tx: DriveTransaction, ctx: DriveContext, row: DriveRow):
   return { ...toDriveItem(row), ...await getItemAccess(tx, ctx, row) };
 }
 
-async function requireItem(tx: DriveTransaction, ctx: DriveContext, id: string): Promise<DriveRow> {
+async function requireItem(tx: DriveTransaction, ctx: DriveContext, id: string, permission: DriveAccessOptions["permission"] = "read"): Promise<DriveRow> {
   const [row] = await tx.select().from(driveItems).where(and(eq(driveItems.id, id), eq(driveItems.state, "complete")));
   if (!row) throw new DriveError("This file or folder is no longer available.");
-  await assertItemAccess(tx, ctx, row);
+  await assertItemAccess(tx, ctx, row, { permission });
   return row;
 }
 
 async function destination(tx: DriveTransaction, ctx: DriveContext, parentId: string | null, addingFolder = false): Promise<DriveRow[]> {
   const path = await folderPath(tx, parentId);
-  if (path.length) await assertItemAccess(tx, ctx, path[path.length - 1]);
-  else await assertItemsAccess(tx, ctx, []);
+  if (path.length) await assertItemAccess(tx, ctx, path[path.length - 1], { permission: "write" });
+  else await assertItemsAccess(tx, ctx, [], { permission: "write" });
   if (addingFolder && path.length >= MAX_FOLDER_DEPTH) throw new DriveError("Folders can be nested up to 64 levels deep.");
   return path;
 }
@@ -81,6 +82,11 @@ export async function listDrive(input: DriveListInput = {}): Promise<ActionResul
         await assertItemAccess(tx, ctx, current, { allowTrashed: trash });
         if (trash && (!current.trashedAt || current.deletionStartedAt)) throw new DriveError("This folder is not in Trash.");
       }
+      const pathAccess = await tryItemsAccess(tx, ctx, path.map((row) => row.id), { allowTrashed: trash });
+      let safePathStart = 0;
+      for (let index = 0; index < path.length; index += 1) {
+        if (!pathAccess.get(path[index].id)) safePathStart = index + 1;
+      }
       const global = !foldersOnly && Boolean(search || type !== "all" || minSize !== undefined || maxSize !== undefined || after || before || tags?.length);
       const conditions: SQL[] = [eq(driveItems.state, "complete"), visibleItemsCondition(ctx, { trash })];
       // Rows being permanently deleted leave Trash immediately; their removal finishes in the background.
@@ -101,11 +107,11 @@ export async function listDrive(input: DriveListInput = {}): Promise<ActionResul
       }
       if (!global && (foldersOnly || filter === "all" || trash)) {
         if (folderId) conditions.push(eq(driveItems.parentId, folderId));
-        else if (trash) conditions.push(sql`not exists (
+        else if (trash) conditions.push(sql`(${discoverableRootsCondition(ctx, { trash })} or not exists (
           select 1 from drive_items parent where parent.id = ${driveItems.parentId}
           and parent.trashed_at is not null and parent.trash_root_id is not distinct from ${driveItems.trashRootId}
-        )`);
-        else conditions.push(isNull(driveItems.parentId));
+        ))`);
+        else conditions.push(discoverableRootsCondition(ctx));
       }
       const sort = parsed.sort ?? (filter === "recent" ? "updatedAt" : "name");
       const direction = parsed.direction ?? (filter === "recent" ? "desc" : "asc");
@@ -140,7 +146,7 @@ export async function listDrive(input: DriveListInput = {}): Promise<ActionResul
       if (unassessed.length) afterResponse(() => prioritizeScans(unassessed));
       return {
         items: rows.map((row) => ({ ...toDriveItem(row), ...access.get(row.id)!, isFavorite: favoriteIds.has(row.id), scanStatus: scanStatus(row.id), scanSuggestion: scanSuggestion(row.id) })),
-        breadcrumbs: path.map(({ id, name }) => ({ id, name })),
+        breadcrumbs: path.slice(safePathStart).map(({ id, name }) => ({ id, name, permission: pathAccess.get(id)!.permission })),
         currentFolder: current ? { ...toDriveItem(current), ...access.get(current.id)!, isFavorite: favoriteIds.has(current.id) } : null,
       };
     });
@@ -152,7 +158,7 @@ export async function createFolder(input: { name: string; parentId?: string | nu
     const { name, parentId } = z.object({ name: nameSchema, parentId: parentSchema }).parse(input);
     return withDriveTransaction("write", async (tx) => {
       await destination(tx, ctx, parentId, true);
-      const [folder] = await tx.insert(driveItems).values({ id: randomUUID(), name, parentId, kind: "folder", state: "complete", size: 0, createdBy: ctx.userId }).returning();
+      const [folder] = await tx.insert(driveItems).values({ id: randomUUID(), name, parentId, kind: "folder", state: "complete", size: 0, createdBy: ctx.userId, ...defaultItemAccess(ctx, parentId) }).returning();
       await recordEvents(tx, ctx, [{ action: "create_folder", item: { id: folder.id, name, kind: "folder", parentId } }]);
       return itemData(tx, ctx, folder);
     });
@@ -186,7 +192,7 @@ export async function renameItem(input: { id: string; name: string }): Promise<A
   return driveAction(async (ctx) => {
     const { id, name } = z.object({ id: idSchema, name: nameSchema }).parse(input);
     await withDriveTransaction("write", async (tx) => {
-      const row = await requireItem(tx, ctx, id);
+      const row = await requireItem(tx, ctx, id, "write");
       await tx.update(driveItems).set({ name, updatedAt: new Date() }).where(eq(driveItems.id, id));
       if (row.name !== name) await recordEvents(tx, ctx, [{ action: "rename", item: { id, name, kind: row.kind, parentId: row.parentId }, details: { fromName: row.name } }]);
     });
@@ -198,10 +204,11 @@ export async function renameItem(input: { id: string; name: string }): Promise<A
  * capability (an MCP connection without Trash access can't replace), and never trashes a folder that
  * holds something being moved or copied, which would take the source (or its parent) with it.
  */
-async function assertReplaceable(tx: DriveTransaction, replaceIds: string[], incoming: DriveTree): Promise<void> {
+async function assertReplaceable(tx: DriveTransaction, ctx: DriveContext, replaceIds: string[], incoming: DriveTree): Promise<void> {
   if (!replaceIds.length) return;
   assertCapability("trash");
   const replaced = await loadTree(tx, replaceIds);
+  await assertItemsAccess(tx, ctx, replaced.rows, { allowTrashed: true, permission: "write" });
   if (replaced.rows.some((row) => incoming.byId.has(row.id))) throw new DriveError("A folder can’t be replaced by something that’s inside it. Choose Keep both or Skip for it.");
 }
 
@@ -212,12 +219,12 @@ export async function moveItems(input: { ids: string[]; parentId: string | null;
       const selected = await selectedRows(tx, ids);
       if (selected.some((row) => row.state !== "complete" || row.trashedAt)) throw new DriveError("Only available files and folders can be moved.");
       const tree = await loadTree(tx, ids);
-      await assertItemsAccess(tx, ctx, tree.rows, { allowTrashed: true });
-      await assertItemsAccess(tx, ctx, selected);
+      await assertItemsAccess(tx, ctx, tree.rows, { allowTrashed: true, permission: "write" });
+      await assertItemsAccess(tx, ctx, selected, { permission: "write" });
       const path = await destination(tx, ctx, parentId);
       assertMoveDepth(tree, path);
-      const plan = planTransfer(tree.roots, await destinationSiblings(tx, parentId), resolutions, "move", parentId);
-      await assertReplaceable(tx, plan.replaceIds, tree);
+      const plan = planTransfer(tree.roots, await destinationSiblings(tx, ctx, parentId), resolutions, "move", parentId);
+      await assertReplaceable(tx, ctx, plan.replaceIds, tree);
       const pendingIds = plan.replaceIds.length ? await trashRows(tx, ctx, plan.replaceIds, { reason: "replaced" }) : [];
       if (path.some((folder) => Boolean(folder.passwordHash))) {
         await tx.update(driveItems).set({ publicToken: null, publicExpiresAt: null, sharedByEmail: null }).where(inArray(driveItems.id, tree.rows.map((row) => row.id)));
@@ -228,15 +235,16 @@ export async function moveItems(input: { ids: string[]; parentId: string | null;
       const renamed = plan.items.filter(({ root, name }) => name !== root.name);
       for (const { root, name } of renamed) await tx.update(driveItems).set({ parentId, name, updatedAt: now }).where(eq(driveItems.id, root.id));
       const fromIds = [...new Set(plan.items.flatMap(({ root }) => root.parentId ?? []))];
-      const fromNames = new Map(fromIds.length ? (await tx.select({ id: driveItems.id, name: driveItems.name }).from(driveItems).where(inArray(driveItems.id, fromIds))).map((row) => [row.id, row.name]) : []);
+      const fromNames = new Map(fromIds.length ? (await tx.select({ id: driveItems.id, name: driveItems.name }).from(driveItems)
+        .where(and(inArray(driveItems.id, fromIds), visibleItemsCondition(ctx)))).map((row) => [row.id, row.name]) : []);
       const toParentName = path.at(-1)?.name ?? null;
       await recordEvents(tx, ctx, plan.items.map(({ root, name }) => ({
         action: "move", item: { id: root.id, name, kind: root.kind, parentId },
-        details: { fromParentId: root.parentId, fromParentName: root.parentId ? fromNames.get(root.parentId) ?? null : null, toParentName, ...(name !== root.name ? { renamedFrom: root.name } : {}) },
+        details: { fromParentId: root.parentId && fromNames.has(root.parentId) ? root.parentId : null, fromParentName: root.parentId ? fromNames.get(root.parentId) ?? null : null, toParentName, ...(name !== root.name ? { renamedFrom: root.name } : {}) },
       })));
       return {
         result: {
-          moved: plan.items.map(({ root }) => ({ id: root.id, fromParentId: root.parentId })),
+          moved: plan.items.map(({ root }) => ({ id: root.id, fromParentId: root.parentId && fromNames.has(root.parentId) ? root.parentId : null })),
           renamed: renamed.map(({ root }) => ({ id: root.id, fromName: root.name })),
           replacedIds: plan.replaceIds,
         },
@@ -267,8 +275,8 @@ export async function copyItems(input: { ids: string[]; parentId: string | null;
       const path = await destination(tx, ctx, parentId);
       if (path.some((folder) => tree.byId.has(folder.id))) throw new DriveError("A folder can’t be copied into itself or one of its subfolders.");
       assertMoveDepth(tree, path);
-      const plan = planTransfer(tree.roots, await destinationSiblings(tx, parentId), resolutions, "copy", parentId);
-      await assertReplaceable(tx, plan.replaceIds, tree);
+      const plan = planTransfer(tree.roots, await destinationSiblings(tx, ctx, parentId), resolutions, "copy", parentId);
+      await assertReplaceable(tx, ctx, plan.replaceIds, tree);
       return { tree, plan };
     });
 
@@ -285,7 +293,8 @@ export async function copyItems(input: { ids: string[]; parentId: string | null;
         source,
         copy: {
           id, name: rootName ?? source.name, kind: source.kind, parentId: rootName === undefined ? newIds.get(source.parentId!)! : parentId,
-          description: source.description, tags: source.tags, folderColor: source.folderColor, state: "complete", createdBy: ctx.userId,
+          description: source.description, tags: source.tags, folderColor: source.folderColor, folderEmoji: source.folderEmoji, state: "complete", createdBy: ctx.userId,
+          ...defaultItemAccess(ctx, rootName === undefined ? newIds.get(source.parentId!)! : parentId),
           ...(source.kind === "file"
             ? { size: source.size, mimeType: source.mimeType, objectKey: createObjectKey(id) }
             // A copied protected folder stays protected, under a fresh version so earlier unlocks don't carry over.
@@ -310,14 +319,22 @@ export async function copyItems(input: { ids: string[]; parentId: string | null;
         }));
       }
       pendingIds = await withDriveTransaction("write", async (tx) => {
+        // Object copying runs outside the hierarchy lock. Re-read current ACLs and content before publishing any copy.
+        const current = await loadTree(tx, ids);
+        await assertItemsAccess(tx, ctx, current.rows, { allowTrashed: true });
+        if (current.rows.length !== tree.rows.length || current.rows.some((row) => {
+          const original = tree.byId.get(row.id);
+          return !original || original.updatedAt.getTime() !== row.updatedAt.getTime()
+            || original.objectKey !== row.objectKey || original.etag !== row.etag;
+        })) throw new DriveError("The source changed while copying. Nothing was copied; please try again.");
         await destination(tx, ctx, parentId);
-        const final = planTransfer(tree.roots, await destinationSiblings(tx, parentId), resolutions, "copy", parentId);
+        const final = planTransfer(current.roots, await destinationSiblings(tx, ctx, parentId), resolutions, "copy", parentId);
         const unchanged = final.items.length === plan.items.length && final.items.every(({ root }, index) => root.id === plan.items[index].root.id)
           && final.replaceIds.join() === plan.replaceIds.join();
         if (!unchanged) throw new DriveError("The destination changed while copying. Nothing was copied; please try again.");
         const finalNames = new Map(final.items.map(({ root, name }) => [root.id, name]));
         for (const { source, copy } of rows) copy.name = finalNames.get(source.id) ?? copy.name;
-        await assertReplaceable(tx, final.replaceIds, tree);
+        await assertReplaceable(tx, ctx, final.replaceIds, current);
         const trashed = final.replaceIds.length ? await trashRows(tx, ctx, final.replaceIds, { reason: "replaced" }) : [];
         await assertQuota(tx, ctx, totalBytes);
         for (let index = 0; index < rows.length; index += 500) {
@@ -347,10 +364,10 @@ export async function restoreItems(ids: string[]): Promise<ActionResult<DriveRes
 }
 
 export async function permanentlyDeleteItems(ids: string[]): Promise<ActionResult<void>> {
-  return driveAction((ctx) => permanentlyDeleteDriveItems(ctx, idsSchema.parse(ids)));
+  return driveAction((ctx) => permanentlyDeleteDriveItems(ctx, idsSchema.parse(ids)), "trash");
 }
 
-/** Permanently deletes everything in Trash this member can open. Removal continues in the background when it takes long. */
+/** Permanently deletes writable, fully accessible Trash trees. Removal continues in the background when it takes long. */
 export async function emptyTrash(): Promise<ActionResult<EmptyTrashResult>> {
   return driveAction((ctx) => emptyDriveTrash(ctx), "trash");
 }
@@ -368,7 +385,8 @@ export async function getArchiveManifest(ids: string[]): Promise<ActionResult<Dr
       const tree = await loadTree(tx, ids);
       const rows = tree.rows.filter((row) => row.state === "complete" && !row.trashedAt);
       await assertItemsAccess(tx, ctx, rows);
-      return { rootIds: tree.roots.map((row) => row.id), items: rows.map(({ id, parentId, name, kind, size }) => ({ id, parentId, name, kind, size })) };
+      const included = new Set(rows.map((row) => row.id));
+      return { rootIds: tree.roots.map((row) => row.id), items: rows.map(({ id, parentId, name, kind, size }) => ({ id, parentId: parentId && included.has(parentId) ? parentId : null, name, kind, size })) };
     });
   }, "read");
 }
@@ -381,6 +399,7 @@ export async function setPublic(input: { id: string; enabled: boolean; expiresIn
     }).parse(input);
     const { url, expiresAt, created, row } = await withDriveTransaction("write", async (tx) => {
       const row = await requireItem(tx, ctx, id);
+      await assertItemAccess(tx, ctx, row, { permission: "manage" });
       if (enabled && !(await canAccessPublic(tx, row))) {
         throw new DriveError(row.kind === "folder" ? "Password-protected folders, and folders inside them, cannot have public links." : "Files in password-protected folders cannot have public links.");
       }
@@ -397,7 +416,7 @@ export async function setPublic(input: { id: string; enabled: boolean; expiresIn
       return { url: publicToken ? publicShareUrl(publicToken) : null, expiresAt, created: enabled && !existing, row };
     });
     // A new public file link sends the file to VirusTotal; the share dialog tells the user before they create it.
-    if (created && row.kind === "file") await queueScanSubmission(row).catch((error) => console.error(`Could not queue a virus scan for ${row.id}`, error));
+    if (created && row.kind === "file") await queueScanSubmission(row, ctx).catch((error) => console.error(`Could not queue a virus scan for ${row.id}`, error));
     return { url, expiresAt };
   }, "share");
 }

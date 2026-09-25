@@ -449,10 +449,20 @@ function SoundEffectListener() {
 
     const onPointerDown = (event: PointerEvent) => {
       if (event.button !== 0 || !(event.target instanceof Element)) return;
+      // Double-click controls use click.detail, which pointerdown does not reliably carry.
+      if (event.target.closest("[data-sound-click]")) return;
       const cue = soundFor(event.target);
       if (!cue) return;
       if (cue.sound === "tick") grab = { x: event.clientX, y: event.clientY, dragged: false };
       play(patch, cue);
+    };
+
+    const onClick = (event: MouseEvent) => {
+      // The first click sounds immediately; subsequent clicks in the same sequence stay quiet.
+      // Keyboard activation has detail 0 and already receives feedback from onKeyDown.
+      if (event.detail !== 1 || !(event.target instanceof Element) || !event.target.closest("[data-sound-click]")) return;
+      const cue = soundFor(event.target);
+      if (cue) play(patch, cue);
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -542,6 +552,7 @@ function SoundEffectListener() {
     });
 
     document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("click", onClick, true);
     document.addEventListener("pointermove", onPointerMove, true);
     document.addEventListener("pointerup", onPointerUp, true);
     document.addEventListener("pointercancel", onPointerUp, true);
@@ -552,6 +563,7 @@ function SoundEffectListener() {
       observer.disconnect();
       stopTicking();
       document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("click", onClick, true);
       document.removeEventListener("pointermove", onPointerMove, true);
       document.removeEventListener("pointerup", onPointerUp, true);
       document.removeEventListener("pointercancel", onPointerUp, true);

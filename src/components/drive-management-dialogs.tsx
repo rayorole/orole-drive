@@ -8,6 +8,7 @@ import { listDrive, moveItems, permanentlyDeleteItems, trashItems } from "@/app/
 import { setFolderPassword } from "@/app/actions/folder-security";
 import type { DriveItem } from "@/lib/drive-types";
 import { optimisticDriveChange } from "@/lib/drive-cache";
+import { canEditItem } from "@/lib/drive-permissions";
 import { DriveAccessError, useFolderAccess } from "@/components/folder-access";
 import { useConflictRun, useDriveUndo } from "@/components/drive-undo";
 import { Button } from "@/components/ui/button";
@@ -38,6 +39,7 @@ export function DriveMoveDialog({ items, onClose, onComplete }: { items: DriveIt
   const blocked = new Set(items.filter((item) => item.kind === "folder").map((item) => item.id));
   const sameParent = items.every((item) => item.parentId === folderId);
   const invalidDestination = Boolean(folderId && blocked.has(folderId)) || Boolean(listing.data?.breadcrumbs.some((crumb) => blocked.has(crumb.id)));
+  const writableDestination = !folderId || canEditItem(listing.data?.currentFolder);
   async function openFolder(id: string | null) {
     if (opening) return;
     setOpening(true);
@@ -79,12 +81,14 @@ export function DriveMoveDialog({ items, onClose, onComplete }: { items: DriveIt
       <div className="min-h-36 max-h-[40dvh] overflow-y-auto rounded-lg border" aria-busy={listing.isFetching || opening}>
         {listing.isPending ? <div className="flex justify-center p-10"><Spinner label="Loading folders" /></div>
           : listing.error ? <div className="flex flex-col gap-3 p-4"><p role="alert" className="text-sm text-muted-foreground">{listing.error.message}</p><Button variant="outline" onClick={() => void openFolder(folderId)} disabled={busy}>{listing.error instanceof DriveAccessError && listing.error.lockedFolder ? "Unlock folder" : "Try again"}</Button></div>
-          : listing.data?.items.length ? <ul aria-label="Destination folders">{listing.data.items.map((folder) => <li key={folder.id}><button disabled={busy || blocked.has(folder.id)} onClick={() => void openFolder(folder.id)} className="flex min-h-11 w-full items-center gap-3 px-3 py-2 text-left text-sm outline-none hover:bg-accent/40 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:opacity-45"><Folder className="size-4 shrink-0 text-muted-foreground" /><span className="min-w-0 flex-1 truncate">{folder.name}</span>{folder.isLocked && <LockKeyhole className="size-3.5 shrink-0" />}<ChevronRight className="size-4 shrink-0" /></button></li>)}</ul>
-          : <p className="p-5 text-center text-sm text-muted-foreground">No folders here. You can move your selection to this location.</p>}
+          : listing.data?.items.length ? <ul aria-label="Destination folders">{listing.data.items.map((folder) => <li key={folder.id}><button disabled={busy || blocked.has(folder.id)} onClick={() => void openFolder(folder.id)} className="flex min-h-11 w-full items-center gap-3 px-3 py-2 text-left text-sm outline-none hover:bg-accent/40 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:opacity-45"><Folder className="size-4 shrink-0 text-muted-foreground" /><span className="min-w-0 flex-1 truncate">{folder.name}</span>{!canEditItem(folder) && <span className="text-xs text-muted-foreground">View only</span>}{folder.isLocked && <LockKeyhole className="size-3.5 shrink-0" />}<ChevronRight className="size-4 shrink-0" /></button></li>)}</ul>
+          : <p className="p-5 text-center text-sm text-muted-foreground">No accessible folders here.</p>}
       </div>
       {(openError || mutation.error) && <p role="alert" className="text-sm text-destructive">{openError || mutation.error?.message}</p>}
       {sameParent && <p className="text-xs text-muted-foreground">Your selection is already in this folder.</p>}
-      <DialogFooter><Button variant="outline" disabled={busy} onClick={onClose}>Cancel</Button><Button disabled={busy || listing.isPending || Boolean(listing.error) || sameParent || invalidDestination} onClick={() => mutation.mutate()}>{busy && <Spinner />}Move here</Button></DialogFooter>
+      {!writableDestination && <p className="text-xs text-muted-foreground">This folder is view-only. Browse into a writable folder or choose All files.</p>}
+      {writableDestination && folderId && <p className="text-xs text-muted-foreground">Items set to Inherit from parent will use this destination’s access. Other access settings stay unchanged.</p>}
+      <DialogFooter><Button variant="outline" disabled={busy} onClick={onClose}>Cancel</Button><Button disabled={busy || listing.isPending || Boolean(listing.error) || sameParent || invalidDestination || !writableDestination || !items.every(canEditItem)} onClick={() => mutation.mutate()}>{busy && <Spinner />}Move here</Button></DialogFooter>
     </DialogContent>
   </Dialog>;
 }
@@ -94,6 +98,7 @@ export function DriveTrashDialog({ items, permanent = false, onClose, onComplete
   const client = useQueryClient();
   const [confirmation, setConfirmation] = useState("");
   const subject = items.length === 1 ? `“${items[0].name}”` : `${items.length} items`;
+  const subjectName = items.length === 1 ? items[0].name : `${items.length} items`;
   const { offerUndo } = useDriveUndo();
   const ids = items.map((item) => item.id);
   const mutation = useMutation({
@@ -110,7 +115,7 @@ export function DriveTrashDialog({ items, permanent = false, onClose, onComplete
   return <Dialog open onOpenChange={(open) => { if (!open && !mutation.isPending) onClose(); }}>
     <DialogContent showCloseButton={!mutation.isPending}>
       <form className="flex flex-col gap-5" onSubmit={(event) => { event.preventDefault(); if (!mutation.isPending && (!permanent || confirmation === "DELETE")) mutation.mutate(); }}>
-        <DialogHeader><DialogTitle className="break-words">{permanent ? "Permanently delete" : "Move to Trash"} {subject}?</DialogTitle><DialogDescription>{permanent ? "All files inside selected folders will also be permanently deleted for the whole family. This cannot be undone." : "Folders move with their contents. You can restore them for 30 days before automatic deletion. Public links will stop working; unfinished uploads inside these folders will be cancelled."}</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle className="min-w-0"><span className="block">{permanent ? "Permanently delete" : "Move to Trash"}</span><span className="block truncate" title={items.length === 1 ? items[0].name : undefined}>{subjectName}</span></DialogTitle><DialogDescription>{permanent ? "Selected items and folder contents will be deleted permanently. This cannot be undone." : "Folders move with their contents. You need Editor access to move them. Restore within 30 days."}</DialogDescription></DialogHeader>
         {permanent && <FieldGroup><Field><FieldLabel htmlFor="drive-delete-confirmation">Type DELETE to confirm</FieldLabel><Input id="drive-delete-confirmation" autoComplete="off" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} disabled={mutation.isPending} required /></Field></FieldGroup>}
         {mutation.error && <p role="alert" className="text-sm text-destructive">{mutation.error.message}</p>}
         <DialogFooter><Button type="button" variant="outline" disabled={mutation.isPending} onClick={onClose}>Cancel</Button><Button type="submit" variant={permanent ? "destructive" : "default"} disabled={mutation.isPending || (permanent && confirmation !== "DELETE")}>{mutation.isPending && <Spinner />}{permanent ? "Delete permanently" : "Move to Trash"}</Button></DialogFooter>

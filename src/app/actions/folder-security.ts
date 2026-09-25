@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq, lt, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { authThrottle } from "@/lib/auth-schema";
-import { assertItemAccess, driveAction, withDriveTransaction } from "@/lib/drive-access";
+import { assertItemAccess, assertItemsAccess, driveAction, withDriveTransaction } from "@/lib/drive-access";
 import type { DriveContext, DriveTransaction } from "@/lib/drive-access";
 import { DriveError } from "@/lib/drive-errors";
 import { driveFolderUnlocks, driveItems } from "@/lib/drive-schema";
@@ -12,6 +12,7 @@ import type { DriveRow } from "@/lib/drive-schema";
 import type { ActionResult } from "@/lib/drive-types";
 import { hashFolderPassword, isValidFolderPassword, verifyFolderPassword } from "@/lib/folder-password";
 import { recordEvents } from "@/lib/activity";
+import { loadTree } from "@/lib/drive-tree";
 
 const idSchema = z.uuid("Choose a valid folder.");
 const passwordSchema = z.string().max(1_024, "Use a password up to 1,024 bytes long.").refine(
@@ -88,9 +89,11 @@ export async function setFolderPassword(input: { id: string; password: string | 
     await withDriveTransaction("write", async (tx) => {
       const folder = await loadFolder(tx, id);
       // Changing or removing existing protection always requires its current grant.
-      await assertItemAccess(tx, ctx, folder, { allowTrashed: true });
+      await assertItemAccess(tx, ctx, folder, { allowTrashed: true, permission: "manage" });
       if (folder.deletionStartedAt) throw new DriveError("This folder is being permanently deleted.");
       if (password === null && folder.passwordHash === null) return;
+      // Protection and public-link revocation affect the full subtree, never a hidden private child.
+      await assertItemsAccess(tx, ctx, (await loadTree(tx, [id])).rows, { allowTrashed: true, permission: "write" });
       if (password !== null) await consumePasswordAttempt(tx, ctx, id);
       const passwordHash = password === null ? null : await hashFolderPassword(password);
       const passwordVersion = password === null ? null : randomUUID();

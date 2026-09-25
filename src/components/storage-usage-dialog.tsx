@@ -28,7 +28,7 @@ function UsageMeter({ label, name, used, quota }: { label: string; name: string;
       <div className="h-full rounded-full" style={{ width: `${Math.min(ratio, 1) * 100}%`, backgroundColor: color }} />
     </div>
     {level && <p className="flex items-center gap-1.5 text-xs font-medium"><TriangleAlert className="size-3.5 shrink-0" style={{ color }} aria-hidden="true" />
-      {level === "full" ? "No space left. Empty Trash or delete old versions to upload again." : `${formatBytes(Math.max(0, quota - used))} left.`}</p>}
+      {level === "full" ? "Visible usage reaches this limit. Delete editable items or old versions to free space." : "Visible usage is near this limit."}</p>}
   </div>;
 }
 
@@ -44,9 +44,10 @@ function UsageDetails({ usage, onNavigate }: { usage: StorageUsageReport; onNavi
 
   return <div className="flex flex-col gap-6">
     <div className="flex flex-col gap-4">
-      <UsageMeter label="Drive" name="Drive storage" used={usage.usedBytes} quota={usage.quotaBytes} />
-      <UsageMeter label="You" name="Your storage" used={usage.memberUsedBytes} quota={usage.memberQuotaBytes} />
+      <UsageMeter label="Accessible files" name="Accessible storage against drive limit" used={usage.usedBytes} quota={usage.quotaBytes} />
+      <UsageMeter label="Your visible uploads" name="Your accessible uploads against member limit" used={usage.memberUsedBytes} quota={usage.memberQuotaBytes} />
     </div>
+    <p className="text-xs text-muted-foreground">Only storage you can access is shown. Private items owned by others are excluded, so uploads may reach the drive limit before these visible totals do.</p>
 
     <Section title="What’s using space">
       {parts.length ? <>
@@ -60,24 +61,24 @@ function UsageDetails({ usage, onNavigate }: { usage: StorageUsageReport; onNavi
             <span className="tabular-nums text-muted-foreground">{formatBytes(part.bytes)}</span>
           </li>)}
         </ul>
-      </> : <p className="text-sm text-muted-foreground">Nothing stored yet.</p>}
+      </> : <p className="text-sm text-muted-foreground">No accessible storage.</p>}
     </Section>
 
     {(usage.trashBytes > 0 || usage.versionBytes > 0) && <Section title="Free up space">
       <ul className="flex flex-col gap-2">
         {usage.trashBytes > 0 && <li className="flex items-center gap-3 rounded-lg border border-border/70 p-3 text-sm">
           <Trash2 className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-          <span className="min-w-0 flex-1">Empty Trash to free {formatBytes(usage.trashBytes)}.</span>
+          <span className="min-w-0 flex-1">Visible Trash uses {formatBytes(usage.trashBytes)}. You can delete items you can edit.</span>
           <Button variant="outline" size="sm" onClick={() => onNavigate("trash")}>Open Trash</Button>
         </li>}
         {usage.versionBytes > 0 && <li className="flex items-center gap-3 rounded-lg border border-border/70 p-3 text-sm">
           <RotateCcw className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-          <span className="min-w-0 flex-1">Old versions use {formatBytes(usage.versionBytes)}. Delete them from a file’s version history.</span>
+          <span className="min-w-0 flex-1">Visible old versions use {formatBytes(usage.versionBytes)}. Editors can delete them from version history.</span>
         </li>}
       </ul>
     </Section>}
 
-    <Section title="By member">
+    <Section title="Visible uploads by member">
       {usage.members.length ? <ul className="flex flex-col gap-2">
         {usage.members.map((member) => {
           const name = member.id === null ? "Unknown (before tracking)" : member.name || member.email;
@@ -91,7 +92,7 @@ function UsageDetails({ usage, onNavigate }: { usage: StorageUsageReport; onNavi
             </div>
           </li>;
         })}
-      </ul> : <p className="text-sm text-muted-foreground">Nobody has added files yet.</p>}
+      </ul> : <p className="text-sm text-muted-foreground">No accessible uploads.</p>}
     </Section>
 
     <Section title="Largest files">
@@ -109,7 +110,7 @@ function UsageDetails({ usage, onNavigate }: { usage: StorageUsageReport; onNavi
           </button>
         </li>)}
       </ul> : <p className="text-sm text-muted-foreground">No files yet.</p>}
-      <p className="text-xs text-muted-foreground">Totals include locked folders; their files are listed only once you unlock them.</p>
+      <p className="text-xs text-muted-foreground">Only files you can access are listed. Locked contents remain hidden until unlocked.</p>
     </Section>
   </div>;
 }
@@ -126,7 +127,7 @@ export function StorageUsageDialog({ open, onOpenChange, onNavigate }: {
     <DialogContent className="gap-5 sm:max-w-lg">
       <DialogHeader>
         <DialogTitle>Storage</DialogTitle>
-        <DialogDescription>{query.data ? `${formatBytes(query.data.usedBytes)} of the family’s ${formatBytes(query.data.quotaBytes)} is in use.` : "How the family’s storage is used."}</DialogDescription>
+        <DialogDescription>{query.data ? `${formatBytes(query.data.usedBytes)} in accessible files, versions, Trash and your uploads. Drive limit: ${formatBytes(query.data.quotaBytes)}.` : "Storage used by items you can access."}</DialogDescription>
       </DialogHeader>
       <div className="-mx-4 max-h-[min(70dvh,640px)] overflow-y-auto px-4 pb-1">
         {query.data ? <UsageDetails usage={query.data} onNavigate={go} />

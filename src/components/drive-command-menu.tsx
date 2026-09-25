@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { listDrive } from "@/app/actions/drive";
 import type { DriveFilter, DriveItem } from "@/lib/drive-types";
+import { canEditItem } from "@/lib/drive-permissions";
 import type { DriveItemAction } from "@/components/drive-item";
 import { CommandMenu, type CommandMenuAction } from "@/components/ui/command-menu";
 
@@ -65,9 +66,9 @@ export function DriveCommandMenu({ filter, items, selected, canUpload, view, col
   const actions: CommandMenuAction[] = [
     ...(selected.length && filter !== "trash" ? [
       { id: "sel-download", group: selection, label: selected.length === 1 && selected[0].kind === "file" ? "Download" : "Download ZIP", icon: <Download />, action: () => onItemAction("download", selected) },
-      { id: "sel-move", group: selection, label: "Move to…", icon: <FolderInput />, action: () => onItemAction("move", selected) },
+      { id: "sel-move", group: selection, label: "Move to…", icon: <FolderInput />, disabled: !selected.every(canEditItem), action: () => onItemAction("move", selected) },
       { id: "sel-favorite", group: selection, label: allFavorites ? "Remove from favorites" : "Add to favorites", icon: allFavorites ? <StarOff /> : <Star />, action: () => onItemAction(allFavorites ? "unfavorite" : "favorite", selected) },
-      { id: "sel-trash", group: selection, label: "Move to Trash", icon: <Trash2 />, action: () => onItemAction("trash", selected) },
+      { id: "sel-trash", group: selection, label: "Move to Trash", icon: <Trash2 />, disabled: !selected.every(canEditItem), action: () => onItemAction("trash", selected) },
     ] : []),
     ...views.map(({ filter: target, label, icon: Icon, keywords }) => ({
       id: `go-${target}`, group: "Go to", label, keywords, icon: <Icon />,
@@ -86,7 +87,7 @@ export function DriveCommandMenu({ filter, items, selected, canUpload, view, col
     { id: "upload-files", group: "Add", label: "Upload files", icon: <ArrowUp />, disabled: !canUpload, keywords: ["add", "import"], action: onUploadFiles },
     { id: "upload-folder", group: "Add", label: "Upload folder", icon: <FolderUp />, disabled: !canUpload, keywords: ["add", "directory"], action: onUploadFolder },
     { id: "new-folder", group: "Add", label: "New folder", icon: <FolderPlus />, disabled: !canUpload, keywords: ["create", "directory"], action: onNewFolder },
-    { id: "empty-trash", group: "Trash", label: "Empty Trash…", icon: <Trash2 />, keywords: ["delete", "permanently", "bin", "clear", "free space"], action: onEmptyTrash },
+    { id: "empty-trash", group: "Trash", label: "Empty Trash…", icon: <Trash2 />, disabled: filter !== "trash" || !items.some(canEditItem), keywords: ["delete", "permanently", "bin", "clear", "free space"], action: onEmptyTrash },
     { id: "view", group: "View", label: view === "list" ? "Show as grid" : "Show as list", icon: view === "list" ? <LayoutGrid /> : <List />, keywords: ["layout", "grid", "list"], action: () => onViewChange(view === "list" ? "grid" : "list") },
     { id: "sidebar", group: "View", label: collapsed ? "Expand sidebar" : "Collapse sidebar", icon: <PanelLeft />, keywords: ["navigation"], action: onToggleSidebar },
     { id: "theme", group: "View", label: dark ? "Switch to light theme" : "Switch to dark theme", icon: dark ? <Sun /> : <Moon />, keywords: ["appearance", "dark", "light", "mode"], action: () => setTheme(dark ? "light" : "dark") },

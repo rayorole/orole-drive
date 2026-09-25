@@ -25,9 +25,9 @@ const STATUS_META = {
 
 export const SCAN_POLL_MS = 15_000;
 
-type FileScanBadgeProps = { token: string; itemId?: never; size?: never } | { token?: never; itemId: string; size: number };
+type FileScanBadgeProps = { token: string; itemId?: never; size?: never; canManage?: never } | { token?: never; itemId: string; size: number; canManage: boolean };
 
-export function FileScanBadge({ token, itemId, size }: FileScanBadgeProps) {
+export function FileScanBadge({ token, itemId, size, canManage }: FileScanBadgeProps) {
   const queryClient = useQueryClient();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const isPrivate = itemId !== undefined;
@@ -65,7 +65,7 @@ export function FileScanBadge({ token, itemId, size }: FileScanBadgeProps) {
 
   const meta = STATUS_META[status.data.status];
   const Icon = meta.icon;
-  const canSubmit = isPrivate && status.data.eligibleForSubmission;
+  const canSubmit = isPrivate && canManage && status.data.eligibleForSubmission;
 
   return <div className="flex flex-col gap-2">
     <div className="flex flex-wrap items-center gap-2" aria-live="polite">

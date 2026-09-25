@@ -2,9 +2,10 @@
 
 import { z } from "zod";
 import { driveAction } from "@/lib/drive-access";
-import { recordDriveOpened, setDriveFavorites, setDriveFolderColor, setDriveItemDescription, setDriveItemTags, toggleDriveFavorite } from "@/lib/drive-metadata";
+import { recordDriveOpened, setDriveFavorites, setDriveFolderColor, setDriveFolderEmoji, setDriveItemDescription, setDriveItemTags, toggleDriveFavorite } from "@/lib/drive-metadata";
 import { FOLDER_COLORS } from "@/lib/drive-types";
 import type { ActionResult } from "@/lib/drive-types";
+import { folderEmojiSchema } from "@/lib/folder-emoji";
 
 const idSchema = z.uuid("Choose a valid file or folder.");
 const tagsSchema = z.array(z.string().max(64)).max(40, "Use up to 20 tags.");
@@ -35,4 +36,8 @@ export async function setItemDescription(id: string, description: string): Promi
 
 export async function setFolderColor(id: string, color: string | null): Promise<ActionResult<void>> {
   return driveAction((ctx) => setDriveFolderColor(ctx, idSchema.parse(id), colorSchema.parse(color)));
+}
+
+export async function setFolderEmoji(id: string, emoji: string | null): Promise<ActionResult<void>> {
+  return driveAction((ctx) => setDriveFolderEmoji(ctx, idSchema.parse(id), folderEmojiSchema.parse(emoji)));
 }

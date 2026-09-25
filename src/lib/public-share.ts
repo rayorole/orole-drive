@@ -1,7 +1,7 @@
 import "server-only";
 
 import { cache } from "react";
-import { and, asc, desc, eq, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { DriveTransaction } from "@/lib/drive-access";
 import { canAccessPublic, withDriveTransaction } from "@/lib/drive-access";
@@ -21,8 +21,8 @@ const PUBLIC_ARCHIVE_MAX_ITEMS = 20_000;
 export type PublicFileAccess = { item: PublicShareItem; downloadUrl: string; previewUrl: string | null; sharedByEmail: string | null };
 export type PublicShare = ({ kind: "file" } & PublicFileAccess) | { kind: "folder"; name: string };
 
-function publicItem(row: Pick<DriveRow, "id" | "name" | "kind" | "size" | "mimeType" | "updatedAt">): PublicShareItem {
-  return { id: row.id, name: row.name, kind: row.kind, size: row.size, mimeType: row.mimeType, updatedAt: row.updatedAt.toISOString() };
+function publicItem(row: Pick<DriveRow, "id" | "name" | "kind" | "size" | "mimeType" | "updatedAt" | "folderColor" | "folderEmoji">): PublicShareItem {
+  return { id: row.id, name: row.name, kind: row.kind, size: row.size, mimeType: row.mimeType, updatedAt: row.updatedAt.toISOString(), folderColor: row.folderColor, folderEmoji: row.folderEmoji };
 }
 
 /** The shared item behind an active token, share-locked so revocation cannot interleave with signing. */
@@ -48,24 +48,24 @@ async function signFile(row: DriveRow, share: DriveRow): Promise<{ downloadUrl: 
  * unavailable, or is (or sits inside) a password-protected folder. Nothing above the shared folder is read out.
  */
 async function sharedFolderPath(tx: DriveTransaction, share: DriveRow, folderId: string): Promise<PublicShareCrumb[] | null> {
-  if (folderId === share.id) return [{ id: share.id, name: share.name }];
-  const chain = await tx.execute<{ id: string; name: string; kind: string; state: string; trashed: boolean; deleting: boolean; has_password: boolean }>(sql`
+  if (folderId === share.id) return [{ id: share.id, name: share.name, folderColor: share.folderColor, folderEmoji: share.folderEmoji }];
+  const chain = await tx.execute<{ id: string; name: string; kind: string; state: string; trashed: boolean; deleting: boolean; has_password: boolean; access_mode: string; owner_id: string | null; folderColor: string | null; folderEmoji: string | null }>(sql`
     with recursive chain as (
       select item.id, item.parent_id, item.name, item.kind, item.state,
         item.trashed_at is not null as trashed, item.deletion_started_at is not null as deleting,
-        item.password_hash is not null as has_password, 0 as depth
+        item.password_hash is not null as has_password, item.access_mode, item.owner_id, item.folder_color, item.folder_emoji, 0 as depth
       from drive_items item where item.id = ${folderId}::uuid
       union all
       select parent.id, parent.parent_id, parent.name, parent.kind, parent.state,
         parent.trashed_at is not null, parent.deletion_started_at is not null,
-        parent.password_hash is not null, chain.depth + 1
+        parent.password_hash is not null, parent.access_mode, parent.owner_id, parent.folder_color, parent.folder_emoji, chain.depth + 1
       from drive_items parent join chain on parent.id = chain.parent_id
       where chain.id <> ${share.id}::uuid and chain.depth < 64
-    ) select id, name, kind, state, trashed, deleting, has_password from chain order by depth desc
+    ) select id, name, kind, state, trashed, deleting, has_password, access_mode, owner_id, folder_color as "folderColor", folder_emoji as "folderEmoji" from chain order by depth desc
   `);
   if (chain[0]?.id !== share.id) return null;
-  if (chain.some((node) => node.kind !== "folder" || node.state !== "complete" || node.trashed || node.deleting || node.has_password)) return null;
-  return chain.map(({ id, name }) => ({ id, name }));
+  if (chain.some((node) => node.kind !== "folder" || node.state !== "complete" || node.trashed || node.deleting || node.has_password || !node.owner_id || (node.id !== share.id && node.access_mode !== "inherit"))) return null;
+  return chain.map(({ id, name, folderColor, folderEmoji }) => ({ id, name, folderColor, folderEmoji }));
 }
 
 /** Resolves a token for the share page; memoized per request so metadata and page share one lookup. */
@@ -87,12 +87,14 @@ export async function getPublicFolderView(token: string, folderId: string | null
     if (!breadcrumbs) return null;
     const rows = await tx.select({
       id: driveItems.id, name: driveItems.name, kind: driveItems.kind, size: driveItems.size,
-      mimeType: driveItems.mimeType, updatedAt: driveItems.updatedAt,
+      mimeType: driveItems.mimeType, updatedAt: driveItems.updatedAt, folderColor: driveItems.folderColor, folderEmoji: driveItems.folderEmoji,
     }).from(driveItems).where(and(
       eq(driveItems.parentId, breadcrumbs[breadcrumbs.length - 1].id),
       eq(driveItems.state, "complete"),
       isNull(driveItems.trashedAt),
       isNull(driveItems.deletionStartedAt),
+      eq(driveItems.accessMode, "inherit"),
+      isNotNull(driveItems.ownerId),
       // Protected subfolders stay invisible, not just locked: their names are private too.
       or(eq(driveItems.kind, "file"), isNull(driveItems.passwordHash)),
     )).orderBy(desc(driveItems.kind), asc(sql`lower(${driveItems.name})`), asc(driveItems.id)).limit(PUBLIC_FOLDER_PAGE_SIZE + 1);
@@ -117,6 +119,8 @@ export async function getPublicFolderFile(token: string, fileId: string): Promis
       eq(driveItems.state, "complete"),
       isNull(driveItems.trashedAt),
       isNull(driveItems.deletionStartedAt),
+      eq(driveItems.accessMode, "inherit"),
+      isNotNull(driveItems.ownerId),
     )).limit(1).for("share");
     if (!row?.parentId) return null;
     const breadcrumbs = await sharedFolderPath(tx, share, row.parentId);
@@ -141,6 +145,7 @@ export async function getPublicFolderManifest(token: string, folderId: string): 
         from drive_items child join tree on child.parent_id = tree.id
         where tree.kind = 'folder' and tree.depth < 64
           and child.state = 'complete' and child.trashed_at is null and child.deletion_started_at is null
+          and child.access_mode = 'inherit' and child.owner_id is not null
           and (child.kind = 'file' or child.password_hash is null)
       ) select id, parent_id as "parentId", name, kind, size from tree limit ${PUBLIC_ARCHIVE_MAX_ITEMS + 1}
     `);

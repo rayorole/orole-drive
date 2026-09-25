@@ -65,6 +65,9 @@ export function toDriveItem(row: DriveRow): DriveItem {
     name: row.name,
     kind: row.kind,
     parentId: row.parentId,
+    owner: null,
+    accessMode: row.accessMode,
+    permission: "viewer",
     size: row.size,
     mimeType: row.mimeType,
     createdAt: row.createdAt.toISOString(),
@@ -78,6 +81,7 @@ export function toDriveItem(row: DriveRow): DriveItem {
     tags: row.tags,
     description: row.description,
     folderColor: row.folderColor,
+    folderEmoji: row.folderEmoji,
     isFavorite: false,
   };
 }

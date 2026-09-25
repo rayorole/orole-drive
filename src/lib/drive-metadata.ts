@@ -1,7 +1,7 @@
 import "server-only";
 
 import { and, eq, inArray } from "drizzle-orm";
-import type { DriveContext, DriveTransaction } from "@/lib/drive-access";
+import type { DriveAccessOptions, DriveContext, DriveTransaction } from "@/lib/drive-access";
 import { assertItemAccess, assertItemsAccess, withDriveTransaction } from "@/lib/drive-access";
 import { DriveError } from "@/lib/drive-errors";
 import { driveActivity, driveFavorites, driveItems } from "@/lib/drive-schema";
@@ -21,7 +21,7 @@ export function normalizeTags(tags: string[]): string[] {
   return normalized;
 }
 
-async function requireItem(tx: DriveTransaction, ctx: DriveContext, id: string, options: { allowTrashed?: boolean } = {}): Promise<DriveRow> {
+async function requireItem(tx: DriveTransaction, ctx: DriveContext, id: string, options: DriveAccessOptions = {}): Promise<DriveRow> {
   const [row] = await tx.select().from(driveItems).where(and(eq(driveItems.id, id), eq(driveItems.state, "complete")));
   if (!row) throw new DriveError("This file or folder is no longer available.");
   await assertItemAccess(tx, ctx, row, options);
@@ -63,22 +63,30 @@ export async function recordDriveOpened(ctx: DriveContext, id: string): Promise<
 export async function setDriveItemTags(ctx: DriveContext, id: string, tags: string[]): Promise<void> {
   const normalized = normalizeTags(tags);
   await withDriveTransaction("write", async (tx) => {
-    const row = await requireItem(tx, ctx, id);
+    const row = await requireItem(tx, ctx, id, { permission: "write" });
     await tx.update(driveItems).set({ tags: normalized, updatedAt: new Date() }).where(eq(driveItems.id, row.id));
   });
 }
 
 export async function setDriveItemDescription(ctx: DriveContext, id: string, description: string): Promise<void> {
   await withDriveTransaction("write", async (tx) => {
-    const row = await requireItem(tx, ctx, id);
+    const row = await requireItem(tx, ctx, id, { permission: "write" });
     await tx.update(driveItems).set({ description, updatedAt: new Date() }).where(eq(driveItems.id, row.id));
   });
 }
 
 export async function setDriveFolderColor(ctx: DriveContext, id: string, color: DriveFolderColor | null): Promise<void> {
   await withDriveTransaction("write", async (tx) => {
-    const row = await requireItem(tx, ctx, id);
+    const row = await requireItem(tx, ctx, id, { permission: "write" });
     if (row.kind !== "folder") throw new DriveError("Only folders can have a color.");
     await tx.update(driveItems).set({ folderColor: color, updatedAt: new Date() }).where(eq(driveItems.id, row.id));
+  });
+}
+
+export async function setDriveFolderEmoji(ctx: DriveContext, id: string, emoji: string | null): Promise<void> {
+  await withDriveTransaction("write", async (tx) => {
+    const row = await requireItem(tx, ctx, id, { permission: "write" });
+    if (row.kind !== "folder") throw new DriveError("Only folders can have an emoji.");
+    await tx.update(driveItems).set({ folderEmoji: emoji, updatedAt: new Date() }).where(eq(driveItems.id, row.id));
   });
 }

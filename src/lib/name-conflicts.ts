@@ -1,6 +1,8 @@
 import "server-only";
 
 import type { DriveTransaction } from "@/lib/db";
+import type { DriveContext } from "@/lib/drive-access";
+import { visibleItemsCondition } from "@/lib/drive-access";
 import type { ConflictResolution, ConflictResolutions, DriveNameConflict } from "@/lib/drive-types";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
@@ -12,13 +14,15 @@ export const conflictResolutionsSchema = z.record(z.string().max(128), z.enum(["
 
 export type DestinationSibling = { id: string; name: string; kind: "file" | "folder" };
 
-/** Complete, non-trashed items directly inside `parentId`, keyed by lowercased name. */
-export async function destinationSiblings(tx: DriveTransaction, parentId: string | null): Promise<Map<string, DestinationSibling>> {
+/** Writable siblings only; private roots belong to the actor's own namespace. */
+export async function destinationSiblings(tx: DriveTransaction, ctx: DriveContext, parentId: string | null): Promise<Map<string, DestinationSibling>> {
   const rows = await tx.select({ id: driveItems.id, name: driveItems.name, kind: driveItems.kind }).from(driveItems).where(and(
     parentId ? eq(driveItems.parentId, parentId) : isNull(driveItems.parentId),
     eq(driveItems.state, "complete"),
     isNull(driveItems.trashedAt),
     sql`${driveItems.deletionStartedAt} is null`,
+    parentId ? undefined : eq(driveItems.ownerId, ctx.userId),
+    visibleItemsCondition(ctx, { permission: "write" }),
   ));
   const siblings = new Map<string, DestinationSibling>();
   for (const row of rows) if (!siblings.has(row.name.toLowerCase())) siblings.set(row.name.toLowerCase(), row);

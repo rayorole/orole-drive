@@ -64,9 +64,11 @@ function ContextMenuContent({
   className,
   sideOffset = 4,
   align = "start",
+  side,
   ...props
 }: React.ComponentProps<typeof BaseContextMenu.Popup> & {
   align?: BaseContextMenu.Positioner.Props["align"];
+  side?: BaseContextMenu.Positioner.Props["side"];
   sideOffset?: BaseContextMenu.Positioner.Props["sideOffset"];
 }) {
   return (
@@ -74,6 +76,7 @@ function ContextMenuContent({
       <ContextMenuPositioner
         className="max-h-(--available-height) max-w-(--available-width)"
         align={align}
+        side={side}
         sideOffset={sideOffset}
       >
         <BaseContextMenu.Popup

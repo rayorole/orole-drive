@@ -10,16 +10,17 @@ import { Popover, PopoverContent, PopoverDescription, PopoverHeader, PopoverTitl
 import { Spinner } from "@/components/spinner";
 import type { PublicShareItem } from "@/lib/drive-types";
 import { PdfPreview } from "@/components/pdf-preview";
-import { getPreviewKind, type PreviewKind } from "@/lib/file-preview";
+import { getPreviewKind, isOfficeKind, type PreviewKind } from "@/lib/file-preview";
 import { languageFor } from "@/lib/syntax-highlight";
 import { TextPreview } from "@/components/text-preview";
+import { OfficePreview } from "@/components/office-preview";
 import { ImageViewer } from "@/components/image-viewer";
 import { AudioPlayer, VideoPlayer, type PlaybackState } from "@/components/media-player";
 import { FileScanBadge } from "@/components/file-scan-badge";
 
 const EMBEDDABLE_KINDS: Record<string, true> = { image: true, video: true, pdf: true };
-const KIND_ICONS = { image: FileImage, video: FileVideo, audio: FileMusic, pdf: FileText, text: FileText } as const;
-const KIND_NOUNS: Record<PreviewKind, string> = { image: "image", video: "video", audio: "audio", pdf: "document", text: "text file" };
+const KIND_ICONS = { image: FileImage, video: FileVideo, audio: FileMusic, pdf: FileText, text: FileText, docx: FileText, xlsx: FileText, pptx: FileText } as const;
+const KIND_NOUNS: Record<PreviewKind, string> = { image: "image", video: "video", audio: "audio", pdf: "document", text: "text file", docx: "document", xlsx: "workbook", pptx: "presentation" };
 
 function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes} ${bytes === 1 ? "byte" : "bytes"}`;
@@ -122,12 +123,13 @@ export function PublicFile({ item, token, inFolder = false, previewUrl: initialP
         <span aria-hidden="true" className="flex size-16 items-center justify-center rounded-2xl bg-muted text-muted-foreground"><Icon className="size-8" strokeWidth={1.4} /></span>
         <div>
           <p className="font-medium">{previewError ? "The preview didn’t load" : "No preview for this file type"}</p>
-          <p className="mt-1 max-w-sm text-sm text-muted-foreground">{previewError ? "The link may have been updated. Reload the preview, or download the file." : "Download the file to open it on your device."}</p>
+          <p className="mt-1 max-w-sm text-sm text-muted-foreground">{previewError ? "The link may have been updated. Reload the preview, or download the file." : /\.(?:doc|xls|ppt)$/i.test(item.name) ? "Legacy Office files are download-only. Preview supports DOCX, XLSX and PPTX." : "Download the file to open it on your device."}</p>
         </div>
         {previewError ? <Button variant="outline" onClick={() => access.mutate("preview")} disabled={access.isPending}>{access.isPending ? <Spinner /> : <RefreshCw data-icon="inline-start" />}Reload preview</Button>
           : <Button onClick={() => access.mutate("download")} disabled={access.isPending}><Download data-icon="inline-start" />Download {formatSize(item.size)}</Button>}
       </div>
       : kind === "text" ? <TextPreview key={previewVersion} url={previewUrl} name={item.name} size={item.size} onReload={() => access.mutate("preview")} isReloading={access.isPending} />
+      : isOfficeKind(kind) ? <OfficePreview key={previewVersion} url={previewUrl} name={item.name} size={item.size} kind={kind} onReload={() => access.mutate("preview")} isReloading={access.isPending} />
       : kind === "image" ? <ImageViewer key={previewVersion} src={previewUrl} alt={item.name} onError={() => setPreviewError(true)} />
       : kind === "video" ? <VideoPlayer key={previewVersion} src={previewUrl} title={item.name} resume={resume} onFailure={mediaFailed} />
       : kind === "audio" ? <AudioPlayer key={previewVersion} src={previewUrl} title={item.name} detail={`${describeType(item.name, kind)}, ${formatSize(item.size)}`} resume={resume} onFailure={mediaFailed} />

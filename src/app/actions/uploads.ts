@@ -5,13 +5,13 @@ import type { ActionResult, DriveItem, DriveNameConflict, ResumableUpload, Uploa
 import { and, asc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import { assertItemAccess, driveAction, withDriveTransaction } from "@/lib/drive-access";
+import { driveAction, withDriveTransaction } from "@/lib/drive-access";
 import { idSchema, nameSchema, parentSchema, uploadKeySchema, uploadResolutionSchema } from "@/lib/drive-input";
 import { DriveError } from "@/lib/drive-errors";
 import { driveItems } from "@/lib/drive-schema";
 import { destinationSiblings, findConflicts } from "@/lib/name-conflicts";
 import { listUploadedParts, signUpload } from "@/lib/storage";
-import { ensureUploadFolder, uploadDestination } from "@/lib/uploads";
+import { assertUploadAccess, ensureUploadFolder, uploadDestination } from "@/lib/uploads";
 
 /** Unfinished uploads this member started (on any device) that can still finish before the 24-hour cleanup. */
 function resumableUploads(ctx: DriveContext) {
@@ -34,7 +34,7 @@ export async function findUploadConflicts(input: { parentId?: string | null; fil
     }).parse(input);
     return withDriveTransaction("read", async (tx) => {
       await uploadDestination(tx, ctx, parentId);
-      return findConflicts(files.map((file) => ({ id: file.key, name: file.name.trim().normalize(), kind: "file" })), await destinationSiblings(tx, parentId));
+      return findConflicts(files.map((file) => ({ id: file.key, name: file.name.trim().normalize(), kind: "file" })), await destinationSiblings(tx, ctx, parentId));
     });
   }, "read");
 }
@@ -53,7 +53,7 @@ export async function listResumableUploads(): Promise<ActionResult<ResumableUplo
   return driveAction(async (ctx) => withDriveTransaction("read", async (tx) => {
     const parent = alias(driveItems, "parent");
     const replaced = alias(driveItems, "replaced");
-    const rows = await tx.select({ upload: driveItems, parentName: parent.name }).from(driveItems)
+    const rows = await tx.select({ upload: driveItems, parentName: parent.name, replacement: replaced }).from(driveItems)
       .leftJoin(parent, eq(parent.id, driveItems.parentId))
       .leftJoin(replaced, eq(replaced.id, driveItems.replacesId))
       .where(and(
@@ -62,11 +62,12 @@ export async function listResumableUploads(): Promise<ActionResult<ResumableUplo
       ))
       .orderBy(asc(driveItems.createdAt));
     const uploads: ResumableUpload[] = [];
-    for (const { upload, parentName } of rows) {
+    for (const { upload, parentName, replacement } of rows) {
       try {
-        await assertItemAccess(tx, ctx, upload);
+        await assertUploadAccess(tx, ctx, upload);
+        if (replacement) await assertUploadAccess(tx, ctx, replacement);
       } catch (error) {
-        // Destinations since trashed, removed or locked are left for the scheduled cleanup.
+        // Destinations or replacement targets no longer writable are left for the scheduled cleanup.
         if (error instanceof DriveError) continue;
         throw error;
       }
@@ -87,7 +88,14 @@ export async function resumeUpload(id: string): Promise<ActionResult<UploadTicke
     return withDriveTransaction("read", async (tx) => {
       const [row] = await tx.select().from(driveItems).where(and(eq(driveItems.id, id), resumableUploads(ctx)));
       if (!row) throw new DriveError("This upload can no longer be resumed. Upload the file again.");
-      await assertItemAccess(tx, ctx, row);
+      await assertUploadAccess(tx, ctx, row);
+      if (row.replacesId) {
+        const [file] = await tx.select().from(driveItems).where(eq(driveItems.id, row.replacesId));
+        if (!file || file.state !== "complete" || file.trashedAt || file.deletionStartedAt) {
+          throw new DriveError("This upload can no longer be resumed. Upload the file again.");
+        }
+        await assertUploadAccess(tx, ctx, file);
+      }
       return signUpload(row, await listUploadedParts(row));
     });
   });

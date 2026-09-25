@@ -38,7 +38,7 @@ export function EmptyTrashDialog({ onClose }: { onClose: () => void }) {
       <form className="flex flex-col gap-5" onSubmit={(event) => { event.preventDefault(); if (ready) mutation.mutate(); }}>
         <DialogHeader>
           <DialogTitle>Empty Trash?</DialogTitle>
-          <DialogDescription>{!data ? "Checking what’s in Trash…" : data.count ? `${plural(data.count)} (${formatBytes(data.bytes)}) will be permanently deleted for the whole family, including everything inside folders. This cannot be undone.` : "There’s nothing in Trash you can delete."}</DialogDescription>
+          <DialogDescription>{!data ? "Checking what’s in Trash…" : data.count ? `${plural(data.count)} (${formatBytes(data.bytes)}) will be permanently deleted for everyone with access, including contents of eligible folders. Only items you can edit are included. This cannot be undone.` : "There’s nothing in Trash you can delete."}</DialogDescription>
         </DialogHeader>
         {summary.isPending && <Skeleton className="h-3 w-2/5" />}
         {data && data.skippedLocked > 0 && <p className="text-xs leading-relaxed text-muted-foreground">{plural(data.skippedLocked)} inside locked folders will be kept. Unlock those folders first to delete them too.</p>}

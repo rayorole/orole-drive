@@ -3,9 +3,9 @@ import "server-only";
 import type { DriveContext, DriveTransaction } from "@/lib/drive-access";
 import type { DriveRow } from "@/lib/drive-schema";
 import type { DriveRestoreResult, EmptyTrashResult, TrashSummary } from "@/lib/drive-types";
-import { and, asc, count, eq, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { after } from "next/server";
-import { assertItemAccess, assertItemsAccess, visibleItemsCondition, withDriveTransaction } from "@/lib/drive-access";
+import { assertItemAccess, assertItemsAccess, discoverableRootsCondition, visibleItemsCondition, withDriveTransaction } from "@/lib/drive-access";
 import { DriveError } from "@/lib/drive-errors";
 import { driveEvents, driveFileVersions, driveFolderUnlocks, driveItems } from "@/lib/drive-schema";
 import { childFirst, folderPath, loadTree, restoreRows, selectedRows } from "@/lib/drive-tree";
@@ -36,8 +36,8 @@ export async function trashRows(tx: DriveTransaction, ctx: DriveContext, ids: st
     throw new DriveError("Only available files and folders can be moved to Trash.");
   }
   const tree = await loadTree(tx, ids);
-  await assertItemsAccess(tx, ctx, tree.rows, { allowTrashed: true });
-  await assertItemsAccess(tx, ctx, selected);
+  await assertItemsAccess(tx, ctx, tree.rows, { allowTrashed: true, permission: "write" });
+  await assertItemsAccess(tx, ctx, selected, { permission: "write" });
   const groupById = new Map<string, string>();
   const groups = new Map<string, string[]>();
   for (const row of childFirst(tree.rows).reverse()) {
@@ -85,7 +85,7 @@ export async function restoreDriveItems(ctx: DriveContext, ids: string[]): Promi
     const selectedIds = new Set(ids);
     // Rows already being deleted stay behind (hidden in Trash) for the deletion to finish.
     const rows = restoreRows(tree, ids).filter((row) => !row.deletionStartedAt || selectedIds.has(row.id));
-    await assertItemsAccess(tx, ctx, rows, { allowTrashed: true });
+    await assertItemsAccess(tx, ctx, rows, { allowTrashed: true, permission: "write" });
     const restoring = new Set(rows.map((row) => row.id));
     // A failed permanent deletion must never restore already removed file bytes.
     for (const row of rows) {
@@ -100,7 +100,7 @@ export async function restoreDriveItems(ctx: DriveContext, ids: string[]): Promi
         await tx.update(driveItems).set({ parentId: null }).where(eq(driveItems.id, row.id));
         relocated.add(row.id);
       } else if (path.length) {
-        await assertItemAccess(tx, ctx, path[path.length - 1], { allowTrashed: true });
+        await assertItemAccess(tx, ctx, path[path.length - 1], { allowTrashed: true, permission: "write" });
       }
     }
     await tx.update(driveItems).set({ trashedAt: null, trashRootId: null, publicToken: null, publicExpiresAt: null, sharedByEmail: null, updatedAt: new Date() })
@@ -154,7 +154,7 @@ export async function permanentlyDeleteDriveItems(ctx: DriveContext, ids: string
     if (selected.some((row) => row.state !== "complete" || !row.trashedAt)) throw new DriveError("Move files and folders to Trash before permanently deleting them.");
     const tree = await loadTree(tx, ids);
     if (tree.rows.some((row) => !row.trashedAt)) throw new DriveError("This folder contains items that are not in Trash.");
-    await assertItemsAccess(tx, ctx, tree.rows, { allowTrashed: true });
+    await assertItemsAccess(tx, ctx, tree.rows, { allowTrashed: true, permission: "write" });
     await startDeletion(tx, tree.rows);
     await recordEvents(tx, ctx, tree.roots.map((row) => ({ action: "delete", item: { id: row.id, name: row.name, kind: row.kind, parentId: row.parentId } })));
     return tree.rows.map((row) => row.id);
@@ -162,14 +162,16 @@ export async function permanentlyDeleteDriveItems(ctx: DriveContext, ids: string
   await finishDeletion(deleting);
 }
 
-/** Everything Emptying Trash would delete for this session: the Trash view's entries, minus those inside locked folders. */
+/** Plans only fully writable Trash trees; invisible items never contribute even to skipped counts. */
 async function planEmptyTrash(tx: DriveTransaction, ctx: DriveContext): Promise<{ roots: string[]; rows: DriveRow[]; bytes: number; skippedLocked: number }> {
   // The same top-level entries the Trash view lists.
   const rootConditions = [
     eq(driveItems.state, "complete"), isNotNull(driveItems.trashedAt), isNull(driveItems.deletionStartedAt),
-    sql`not exists (select 1 from drive_items parent where parent.id = ${driveItems.parentId} and parent.trashed_at is not null and parent.trash_root_id is not distinct from ${driveItems.trashRootId})`,
+    or(
+      sql`not exists (select 1 from drive_items parent where parent.id = ${driveItems.parentId} and parent.trashed_at is not null and parent.trash_root_id is not distinct from ${driveItems.trashRootId})`,
+      discoverableRootsCondition(ctx, { trash: true }),
+    ),
   ];
-  const [{ total }] = await tx.select({ total: count() }).from(driveItems).where(and(...rootConditions));
   const visible = await tx.select({ id: driveItems.id }).from(driveItems).where(and(...rootConditions, visibleItemsCondition(ctx, { trash: true })));
   const roots: string[] = [];
   const rows = new Map<string, DriveRow>();
@@ -177,7 +179,7 @@ async function planEmptyTrash(tx: DriveTransaction, ctx: DriveContext): Promise<
     const tree = await loadTree(tx, [id]);
     if (tree.rows.some((row) => !row.trashedAt)) continue;
     try {
-      await assertItemsAccess(tx, ctx, tree.rows, { allowTrashed: true });
+      await assertItemsAccess(tx, ctx, tree.rows, { allowTrashed: true, permission: "write" });
     } catch (error) {
       if (error instanceof DriveError) continue;
       throw error;
@@ -187,7 +189,7 @@ async function planEmptyTrash(tx: DriveTransaction, ctx: DriveContext): Promise<
   }
   const all = [...rows.values()];
   const bytes = all.reduce((sum, row) => sum + (row.kind === "file" && row.state === "complete" ? row.size : 0), 0);
-  return { roots, rows: all, bytes, skippedLocked: total - roots.length };
+  return { roots, rows: all, bytes, skippedLocked: visible.length - roots.length };
 }
 
 export async function trashSummary(ctx: DriveContext): Promise<TrashSummary> {
@@ -195,7 +197,7 @@ export async function trashSummary(ctx: DriveContext): Promise<TrashSummary> {
   return { count: plan.roots.length, bytes: plan.bytes, skippedLocked: plan.skippedLocked };
 }
 
-/** Permanently deletes every Trash item this member can open; items inside locked folders stay. */
+/** Permanently deletes fully writable Trash trees; unreadable or read-only descendants keep their tree intact. */
 export async function emptyDriveTrash(ctx: DriveContext): Promise<EmptyTrashResult> {
   const plan = await withDriveTransaction("write", async (tx) => {
     const planned = await planEmptyTrash(tx, ctx);

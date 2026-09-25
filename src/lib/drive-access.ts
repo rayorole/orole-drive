@@ -9,7 +9,7 @@ import { isVerifiedFamilyUser } from "@/lib/auth-policy";
 import { session, user } from "@/lib/auth-schema";
 import { getDb } from "@/lib/db";
 import type { Database, DriveTransaction } from "@/lib/db";
-import { evaluateItemAccess } from "@/lib/drive-access-policy";
+import { evaluateItemAccess, evaluatePublicItemAccess } from "@/lib/drive-access-policy";
 import type { DriveAccessFlags, DriveAccessNode, DriveAccessOptions } from "@/lib/drive-access-policy";
 import { DriveError, LockedFolderError, NameConflictError } from "@/lib/drive-errors";
 import { driveItems } from "@/lib/drive-schema";
@@ -17,6 +17,11 @@ import type { DriveRow } from "@/lib/drive-schema";
 import type { ActionResult } from "@/lib/drive-types";
 
 export type { DriveTransaction } from "@/lib/db";
+export type { DriveAccessOptions } from "@/lib/drive-access-policy";
+
+export function defaultItemAccess(ctx: DriveContext, parentId: string | null) {
+  return { ownerId: ctx.userId, accessMode: parentId ? "inherit" as const : "private" as const, memberRole: "viewer" as const };
+}
 
 export interface DriveContext {
   sessionId: string;
@@ -145,8 +150,13 @@ async function loadAccessNodes(
       ancestor.trashed_at is not null as trashed,
       ancestor.deletion_started_at is not null as deleting,
       ancestor.password_hash is not null as "hasPassword",
-      ${currentGrant} as unlocked
+      ${currentGrant} as unlocked,
+      ancestor.owner_id as "ownerId", ancestor.access_mode as "accessMode", ancestor.member_role as "memberRole",
+      case when owner.id is null then null else json_build_object('id', owner.id, 'name', owner.name, 'email', owner.email) end as owner,
+      (select membership.role from drive_item_members membership
+        where membership.item_id = ancestor.id and membership.user_id = ${ctx?.userId ?? null}) as "selectedRole"
     from ancestors ancestor
+    left join auth_user owner on owner.id = ancestor.owner_id
   `);
   return new Map(nodes.map((node) => [node.id, node]));
 }
@@ -158,17 +168,25 @@ export async function assertItemAccess(
   options: DriveAccessOptions = {},
 ): Promise<void> {
   const nodes = await loadAccessNodes(tx, ctx, [row.id]);
-  evaluateItemAccess(nodes, row.id, options);
+  evaluateItemAccess(nodes, row.id, ctx.userId, options);
 }
 
 export async function assertItemsAccess(
   tx: DriveTransaction,
   ctx: DriveContext,
   rows: DriveRow[],
-  options: { allowTrashed?: boolean } = {},
+  options: DriveAccessOptions = {},
 ): Promise<void> {
   const nodes = await loadAccessNodes(tx, ctx, rows.map((row) => row.id));
-  for (const row of rows) evaluateItemAccess(nodes, row.id, options);
+  for (const row of rows) evaluateItemAccess(nodes, row.id, ctx.userId, options);
+}
+
+export async function assertItemWriteAccess(tx: DriveTransaction, ctx: DriveContext, row: DriveRow, options: DriveAccessOptions = {}): Promise<void> {
+  await assertItemAccess(tx, ctx, row, { ...options, permission: "write" });
+}
+
+export async function assertItemsWriteAccess(tx: DriveTransaction, ctx: DriveContext, rows: DriveRow[], options: DriveAccessOptions = {}): Promise<void> {
+  await assertItemsAccess(tx, ctx, rows, { ...options, permission: "write" });
 }
 
 export async function getItemAccess(
@@ -177,7 +195,7 @@ export async function getItemAccess(
   row: DriveRow,
 ): Promise<DriveAccessFlags> {
   const nodes = await loadAccessNodes(tx, ctx, [row.id]);
-  return evaluateItemAccess(nodes, row.id, {
+  return evaluateItemAccess(nodes, row.id, ctx.userId, {
     allowTrashed: row.trashedAt !== null,
     includeSelf: false,
   });
@@ -191,7 +209,7 @@ export async function getItemsAccess(
   const nodes = await loadAccessNodes(tx, ctx, rows.map((row) => row.id));
   const flags = new Map<string, DriveAccessFlags>();
   for (const row of rows) {
-    flags.set(row.id, evaluateItemAccess(nodes, row.id, {
+    flags.set(row.id, evaluateItemAccess(nodes, row.id, ctx.userId, {
       allowTrashed: row.trashedAt !== null,
       includeSelf: false,
     }));
@@ -210,7 +228,7 @@ export async function tryItemsAccess(
   const flags = new Map<string, DriveAccessFlags | null>();
   for (const id of ids) {
     try {
-      flags.set(id, evaluateItemAccess(nodes, id, options));
+      flags.set(id, evaluateItemAccess(nodes, id, ctx.userId, options));
     } catch (error) {
       if (!(error instanceof DriveError)) throw error;
       flags.set(id, null);
@@ -226,7 +244,7 @@ export async function canAccessPublic(tx: DriveTransaction, row: DriveRow): Prom
   try {
     // No grants are loaded: any protected ancestor makes public access impossible,
     // even when the requesting browser happens to have an unlocked private session.
-    evaluateItemAccess(nodes, row.id);
+    evaluatePublicItemAccess(nodes, row.id);
     return true;
   } catch (error) {
     if (error instanceof DriveError) return false;
@@ -234,35 +252,58 @@ export async function canAccessPublic(tx: DriveTransaction, row: DriveRow): Prom
   }
 }
 
-export function visibleItemsCondition(ctx: DriveContext, options: { trash?: boolean } = {}): SQL {
+type VisibleItemsOptions = { trash?: boolean; permission?: DriveAccessOptions["permission"]; includePending?: boolean };
+
+function visibleItemIds(ctx: DriveContext, options: VisibleItemsOptions): SQL {
   const activeRoots = options.trash ? sql`true` : sql`visible_root.trashed_at is null and visible_root.deletion_started_at is null`;
   const activeChildren = options.trash ? sql`true` : sql`visible_child.trashed_at is null and visible_child.deletion_started_at is null`;
-  return sql`exists (
-    select 1 from auth_session active_session
-    where active_session.id = ${ctx.sessionId} and active_session.user_id = ${ctx.userId}
-      and active_session.expires_at > clock_timestamp()
-  ) and ${driveItems.id} in (
+  const role = (alias: "visible_root" | "visible_child", inherited: SQL): SQL => {
+    const item = sql.identifier(alias);
+    return sql`case
+      when ${item}.owner_id is null then null
+      when ${item}.owner_id = ${ctx.userId} then 'owner'
+      when ${item}.access_mode = 'members' then ${item}.member_role
+      when ${item}.access_mode = 'selected' then (select membership.role from drive_item_members membership
+        where membership.item_id = ${item}.id and membership.user_id = ${ctx.userId})
+      when ${item}.access_mode = 'inherit' then ${inherited}
+      else null end`;
+  };
+  const requiredRole = options.permission === "manage" ? sql`permission = 'owner'`
+    : options.permission === "write" ? sql`permission in ('owner', 'editor')` : sql`permission is not null`;
+  return sql`
     with recursive active_grants as (
       select folder_id, password_version from drive_folder_unlocks
       where session_id = ${ctx.sessionId} and expires_at > clock_timestamp()
-    ), visible (id, kind, may_descend, depth) as (
+    ), visible (id, kind, may_descend, depth, permission) as (
       select visible_root.id, visible_root.kind,
         (visible_root.password_hash is null or exists (
-          select 1 from active_grants
-          where folder_id = visible_root.id and password_version = visible_root.password_version
-        )), 0
+          select 1 from active_grants where folder_id = visible_root.id and password_version = visible_root.password_version
+        )), 0, ${role("visible_root", sql`null::text`)}
       from drive_items visible_root
-      where visible_root.parent_id is null and visible_root.state = 'complete' and ${activeRoots}
+      where visible_root.parent_id is null and ${options.includePending ? sql`true` : sql`visible_root.state = 'complete'`} and ${activeRoots}
       union all
       select visible_child.id, visible_child.kind,
         (visible_child.password_hash is null or exists (
-          select 1 from active_grants
-          where folder_id = visible_child.id and password_version = visible_child.password_version
-        )), visible.depth + 1
+          select 1 from active_grants where folder_id = visible_child.id and password_version = visible_child.password_version
+        )), visible.depth + 1, ${role("visible_child", sql`case when visible.permission = 'owner' then 'editor' else visible.permission end`)}
       from drive_items visible_child join visible on visible_child.parent_id = visible.id
       where visible.kind = 'folder' and visible.may_descend
         and visible.depth < 64 and (visible_child.kind = 'file' or visible.depth < 63)
-        and visible_child.state = 'complete' and ${activeChildren}
-    ) select id from visible
-  )`;
+        and ${options.includePending ? sql`true` : sql`visible_child.state = 'complete'`} and ${activeChildren}
+    ) select id from visible where ${requiredRole} and exists (
+      select 1 from auth_session active_session join auth_user member on member.id = active_session.user_id
+      where active_session.id = ${ctx.sessionId} and active_session.user_id = ${ctx.userId}
+        and active_session.expires_at > clock_timestamp() and member.email = ${ctx.email}
+        and member.email_verified and split_part(lower(trim(member.email)), '@', 2) = 'orole.be'
+    )
+  `;
+}
+
+export function visibleItemsCondition(ctx: DriveContext, options: VisibleItemsOptions = {}): SQL {
+  return sql`${driveItems.id} in (${visibleItemIds(ctx, options)})`;
+}
+
+/** Directly shared/owned nested items appear at the root when their real parent is inaccessible. */
+export function discoverableRootsCondition(ctx: DriveContext, options: VisibleItemsOptions = {}): SQL {
+  return sql`(${driveItems.parentId} is null or ${driveItems.parentId} not in (${visibleItemIds(ctx, options)}))`;
 }

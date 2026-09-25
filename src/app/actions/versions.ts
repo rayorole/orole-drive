@@ -13,17 +13,17 @@ import { DriveError } from "@/lib/drive-errors";
 import { driveFileVersions, driveItems } from "@/lib/drive-schema";
 import { afterContentChange, replaceFileContent } from "@/lib/file-versions";
 import { removeVersionObject, signVersionDownload } from "@/lib/storage";
-import { itemData } from "@/lib/uploads";
+import { itemData, uploadDestination } from "@/lib/uploads";
 
 const versionIdSchema = z.uuid("Choose a valid version.");
 
-/** A version and its file, when the file is available (complete, not in Trash) and this session may open it. */
-async function availableVersion(tx: DriveTransaction, ctx: DriveContext, versionId: string): Promise<{ version: DriveFileVersionRow; file: DriveRow }> {
+/** A version and its file, when the file is available (complete, not in Trash) with the required current access. */
+async function availableVersion(tx: DriveTransaction, ctx: DriveContext, versionId: string, permission: "read" | "write" = "read"): Promise<{ version: DriveFileVersionRow; file: DriveRow }> {
   const [version] = await tx.select().from(driveFileVersions).where(eq(driveFileVersions.id, versionId));
   if (!version) throw new DriveError("This version is no longer available.");
   const [file] = await tx.select().from(driveItems).where(eq(driveItems.id, version.itemId));
   if (!file || file.state !== "complete" || file.trashedAt || file.deletionStartedAt) throw new DriveError("This file is in Trash or is no longer available.");
-  await assertItemAccess(tx, ctx, file);
+  await assertItemAccess(tx, ctx, file, { permission });
   return { version, file };
 }
 
@@ -66,7 +66,8 @@ export async function restoreVersion(versionId: string): Promise<ActionResult<Dr
   return driveAction(async (ctx) => {
     versionId = versionIdSchema.parse(versionId);
     const result = await withDriveTransaction("write", async (tx) => {
-      const { version, file } = await availableVersion(tx, ctx, versionId);
+      const { version, file } = await availableVersion(tx, ctx, versionId, "write");
+      await uploadDestination(tx, ctx, file.parentId);
       await tx.delete(driveFileVersions).where(eq(driveFileVersions.id, version.id));
       const replaced = await replaceFileContent(tx, file, { objectKey: version.objectKey, size: version.size, mimeType: version.mimeType, etag: version.etag, createdBy: version.createdBy });
       await recordEvents(tx, ctx, [{ action: "restore_version", item: { id: file.id, name: file.name, kind: "file", parentId: file.parentId }, details: { versionId: version.id, size: version.size } }]);
@@ -81,7 +82,7 @@ export async function deleteVersion(versionId: string): Promise<ActionResult<voi
   return driveAction(async (ctx) => {
     versionId = versionIdSchema.parse(versionId);
     const version = await withDriveTransaction("write", async (tx) => {
-      const { version, file } = await availableVersion(tx, ctx, versionId);
+      const { version, file } = await availableVersion(tx, ctx, versionId, "write");
       await tx.delete(driveFileVersions).where(eq(driveFileVersions.id, version.id));
       await recordEvents(tx, ctx, [{ action: "delete_version", item: { id: file.id, name: file.name, kind: "file", parentId: file.parentId }, details: { versionId: version.id, size: version.size } }]);
       return version;

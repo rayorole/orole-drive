@@ -1,10 +1,25 @@
 import type { DRIVE_EVENT_ACTIONS } from "@/lib/drive-schema";
 
+export type DrivePermission = "owner" | "editor" | "viewer";
+export type DriveAccessMode = "private" | "inherit" | "members" | "selected";
+export type ShareMember = { id: string; name: string; email: string };
+export type ItemSharing = {
+  accessMode: DriveAccessMode;
+  memberRole: "viewer" | "editor";
+  members: (ShareMember & { role: "viewer" | "editor" })[];
+  inheritedFrom: { id: string; name: string } | null;
+  hasParent: boolean;
+  canManage: boolean;
+};
+
 export type DriveItem = {
   id: string;
   name: string;
   kind: "file" | "folder";
   parentId: string | null;
+  owner: ShareMember | null;
+  accessMode: DriveAccessMode;
+  permission: DrivePermission;
   size: number;
   mimeType: string | null;
   createdAt: string;
@@ -19,6 +34,7 @@ export type DriveItem = {
   tags: string[];
   description: string;
   folderColor: string | null;
+  folderEmoji: string | null;
   isFavorite: boolean;
   /** Virus scan state for files; absent when never scanned or the scan found nothing to report. */
   scanStatus?: DriveScanStatus;
@@ -30,7 +46,7 @@ export const FOLDER_COLORS = ["blue", "green", "amber", "red", "violet", "gray"]
 export type DriveFolderColor = (typeof FOLDER_COLORS)[number];
 export type DriveListing = {
   items: DriveItem[];
-  breadcrumbs: { id: string; name: string }[];
+  breadcrumbs: { id: string; name: string; permission: DrivePermission }[];
   currentFolder: DriveItem | null;
 };
 export type DriveFilter = "all" | "public" | "recent" | "trash" | "favorites";
@@ -107,8 +123,8 @@ export type DriveActivityEvent = {
 export type DriveActivityPage = { events: DriveActivityEvent[]; nextCursor: string | null };
 export type DriveActivityMember = { id: string; name: string; email: string };
 /** What an anonymous visitor may learn about an item in a public share: never tags, descriptions, owners or ids above the share. */
-export type PublicShareItem = Pick<DriveItem, "id" | "name" | "kind" | "size" | "mimeType" | "updatedAt">;
-export type PublicShareCrumb = { id: string; name: string };
+export type PublicShareItem = Pick<DriveItem, "id" | "name" | "kind" | "size" | "mimeType" | "updatedAt" | "folderColor" | "folderEmoji">;
+export type PublicShareCrumb = Pick<DriveItem, "id" | "name" | "folderColor" | "folderEmoji">;
 export type PublicFolderView = {
   share: { sharedByEmail: string | null; expiresAt: string | null };
   /** From the shared folder down to the folder being viewed (the last entry). */
