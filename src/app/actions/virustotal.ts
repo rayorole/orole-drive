@@ -9,7 +9,8 @@ import { driveItems } from "@/lib/drive-schema";
 import type { DriveRow } from "@/lib/drive-schema";
 import type { ActionResult } from "@/lib/drive-types";
 import { signDownload } from "@/lib/storage";
-import { getAnalysisReport, getFileReportByHash, hashRemoteFile, MAX_AUTO_HASH_BYTES, MAX_VT_SUBMISSION_BYTES, submitFileForScanning, virusTotalApiKey } from "@/lib/virustotal";
+import { getAnalysisReport, getFileReportByHash, hashRemoteFile, MAX_AUTO_HASH_BYTES, MAX_VT_SUBMISSION_BYTES, virusTotalApiKey } from "@/lib/virustotal";
+import { isSubmitting, queueScanSubmission, SUBMISSION_TIMEOUT_MS } from "@/lib/virus-scan-jobs";
 import { driveVirusScans } from "@/lib/virustotal-schema";
 import type { DriveVirusScanRow } from "@/lib/virustotal-schema";
 
@@ -41,6 +42,12 @@ function toStatus(scan: DriveVirusScanRow | null, sizeBytes: number, allowSubmis
 async function ensureScan(tx: DriveTransaction, row: DriveRow): Promise<DriveVirusScanRow | null> {
   const [existing] = await tx.select().from(driveVirusScans).where(eq(driveVirusScans.itemId, row.id)).limit(1);
   if (!virusTotalApiKey()) return existing ?? null;
+  if (existing && isSubmitting(existing)) {
+    // Still uploading in the background. A stale placeholder means the job died; forget it so it can be resubmitted.
+    if (Date.now() - existing.scannedAt.getTime() < SUBMISSION_TIMEOUT_MS) return existing;
+    await tx.delete(driveVirusScans).where(and(eq(driveVirusScans.itemId, row.id), eq(driveVirusScans.sha256, "")));
+    return null;
+  }
   if (existing) {
     const refreshAfter = existing.status === "pending" || existing.status === "unknown" ? 30_000 : 24 * 60 * 60_000;
     if (Date.now() - existing.scannedAt.getTime() < refreshAfter) return existing;
@@ -97,6 +104,7 @@ export async function submitFileScan(id: string, consent: boolean): Promise<Acti
       await assertItemAccess(tx, ctx, item);
       return item;
     });
+    if (!virusTotalApiKey()) throw new DriveError("Virus scanning isn’t set up on this drive.");
     if (!row.etag) throw new DriveError("This file is not available for scanning.");
     if (!Number.isSafeInteger(row.size) || row.size < 0 || row.size > MAX_VT_SUBMISSION_BYTES) {
       throw new DriveError("VirusTotal submissions are limited to 650 MB. This file was not downloaded or sent.");
@@ -106,26 +114,10 @@ export async function submitFileScan(id: string, consent: boolean): Promise<Acti
       return scan;
     });
     if (cached && cached.status !== "unknown") return toStatus(cached, row.size);
-    const url = await signDownload(row, false, 120);
-    if (!url) throw new DriveError("This file is not available for scanning.");
-    const submission = await submitFileForScanning(url, row.size, row.name);
-    if (!submission) throw new DriveError("VirusTotal could not accept this file right now. Try again in a moment.");
-    return withDriveTransaction("write", async (tx) => {
-      const current = await loadScannableFile(tx, fileId);
-      await assertItemAccess(tx, ctx, current);
-      if (current.etag !== row.etag || current.size !== row.size) throw new DriveError("The file changed during submission. Reopen its details.");
-      const [scan] = await tx.insert(driveVirusScans).values({
-        itemId: row.id, sha256: submission.sha256, status: submission.report.status,
-        analysisId: submission.analysisId,
-        statsJson: submission.report.statsJson, permalink: submission.report.permalink,
-      }).onConflictDoUpdate({
-        target: driveVirusScans.itemId,
-        set: {
-          sha256: submission.sha256, status: submission.report.status,
-          analysisId: submission.analysisId,
-          statsJson: submission.report.statsJson, permalink: submission.report.permalink, scannedAt: sql`clock_timestamp()`,
-        },
-      }).returning();
+    // The upload runs after this response; the drive shows the file as scanning until VirusTotal answers.
+    if (!(await queueScanSubmission(row))) throw new DriveError("VirusTotal could not accept this file right now. Try again in a moment.");
+    return withDriveTransaction("read", async (tx) => {
+      const [scan] = await tx.select().from(driveVirusScans).where(eq(driveVirusScans.itemId, row.id)).limit(1);
       return toStatus(scan ?? null, row.size);
     });
   }, "write");
@@ -146,10 +138,12 @@ async function loadPublicScannableFile(tx: DriveTransaction, token: string): Pro
 export async function getPublicFileScanStatus(token: string): Promise<ActionResult<FileScanStatus>> {
   try {
     const shareToken = tokenSchema.parse(token);
-    const status = await withDriveTransaction("read", async (tx) => {
+    const status = await withDriveTransaction("write", async (tx) => {
       const row = await loadPublicScannableFile(tx, shareToken);
       const [scan] = await tx.select().from(driveVirusScans).where(eq(driveVirusScans.itemId, row.id)).limit(1);
-      return toStatus(scan ?? null, row.size, false);
+      // Visitors may advance a scan already in progress (throttled in ensureScan), but never start one.
+      const current = scan?.status === "pending" ? await ensureScan(tx, row) : scan;
+      return toStatus(current ?? null, row.size, false);
     });
     return { success: true, data: status };
   } catch (error) {

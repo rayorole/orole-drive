@@ -16,7 +16,10 @@ export type DriveItem = {
   description: string;
   folderColor: string | null;
   isFavorite: boolean;
+  /** Virus scan state for files; absent when never scanned or the scan found nothing to report. */
+  scanStatus?: DriveScanStatus;
 };
+export type DriveScanStatus = "scanning" | "clean" | "suspicious" | "malicious";
 export const FOLDER_COLORS = ["blue", "green", "amber", "red", "violet", "gray"] as const;
 export type DriveFolderColor = (typeof FOLDER_COLORS)[number];
 export type DriveListing = {

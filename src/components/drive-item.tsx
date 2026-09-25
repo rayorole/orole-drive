@@ -1,16 +1,18 @@
 "use client";
 
-import { Fragment, type MouseEvent, type ReactElement, type ReactNode } from "react";
+import { Fragment, useState, type DragEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import {
   Archive, ArrowUp, Code2, Download, File, FileImage, FileMusic, FileText,
   FileVideo, Folder, FolderCog, FolderInput, FolderPlus, FolderUp, Info, KeyRound, Link2, LockKeyhole,
-  MoreHorizontal, Pencil, Plus, RotateCcw, ShieldCheck, Star, Trash2, UnlockKeyhole,
+  MoreHorizontal, Pencil, Plus, RotateCcw, ShieldAlert, ShieldCheck, Star, Trash2, UnlockKeyhole,
 } from "lucide-react";
 import type { DriveItem } from "@/lib/drive-types";
 import { cn } from "@/lib/utils";
+import { endItemDrag, itemDropHandlers, startItemDrag, type DropTarget } from "@/lib/drive-drag";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { DriveThumbnail } from "@/components/drive-thumbnail";
+import { ScanningIndicator } from "@/components/file-scan-badge";
 import {
   ContextMenu, ContextMenuContent, ContextMenuGroup, ContextMenuItem,
   ContextMenuLabel, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent,
@@ -63,7 +65,7 @@ export function DriveFileIcon({ item, large = false }: {
   );
 }
 
-export type DriveItemAction = "open" | "rename" | "trash" | "permanent" | "restore" | "share" | "download" | "move" | "password" | "lock" | "upload-files" | "upload-folder" | "new-folder" | "details";
+export type DriveItemAction = "open" | "rename" | "trash" | "permanent" | "restore" | "share" | "download" | "move" | "password" | "lock" | "upload-files" | "upload-folder" | "new-folder" | "details" | "scan";
 type ItemActionHandler = (action: DriveItemAction, items: DriveItem[]) => void;
 type MenuEntry = { action: DriveItemAction; label: string; icon: typeof Folder; destructive?: boolean; disabled?: boolean };
 
@@ -73,6 +75,12 @@ type MenuNode = MenuEntry | MenuSubmenu;
 // A submenu with a single entry is shown inline, and an empty one is dropped.
 function submenu(label: string, icon: typeof Folder, entries: MenuEntry[]): MenuNode[] {
   return entries.length > 1 ? [{ submenu: label, icon, entries }] : entries;
+}
+
+function scanEntry(file: DriveItem): MenuEntry {
+  if (file.scanStatus === "scanning") return { action: "scan", label: "Scanning for viruses…", icon: ShieldCheck, disabled: true };
+  if (file.scanStatus) return { action: "details", label: "View scan result", icon: file.scanStatus === "clean" ? ShieldCheck : ShieldAlert };
+  return { action: "scan", label: "Scan for viruses", icon: ShieldCheck };
 }
 
 // Sections are separated by a divider; destructive actions always sit alone at the bottom.
@@ -91,6 +99,7 @@ function itemMenu(items: DriveItem[], trash: boolean): MenuNode[][] {
       ...(single ? [{ action: "open" as const, label: single.isLocked ? "Unlock folder" : folder ? "Open folder" : "Preview", icon: single.isLocked ? UnlockKeyhole : folder ? Folder : File }] : []),
       { action: "download", label: single?.kind === "file" ? "Download" : "Download ZIP", icon: Download },
       ...(single?.kind === "file" ? [{ action: "share" as const, label: single.publicToken ? "Manage public link" : single.isProtected ? "Protected — no public links" : "Share file", icon: Link2, disabled: single.isProtected }] : []),
+      ...(single?.kind === "file" ? [scanEntry(single)] : []),
     ],
     [
       ...(folder ? submenu("Add to folder", Plus, [
@@ -153,10 +162,10 @@ function ItemContext({ render, children, targets, trash, disabled, onAction }: {
 }
 
 function ItemStatus({ item }: { item: DriveItem }) {
-  return <>{item.isFavorite && <Star aria-label="Favorited" className="size-3.5 shrink-0 fill-amber-400 text-amber-400" />}{item.isProtected && <LockKeyhole aria-label={item.isLocked ? "Locked folder" : "Password protected"} className="size-3.5 shrink-0 text-muted-foreground" />}{item.publicToken && <Link2 aria-label="Public link enabled" className="size-3.5 shrink-0 text-primary" />}</>;
+  return <>{item.isFavorite && <Star aria-label="Favorited" className="size-3.5 shrink-0 fill-amber-400 text-amber-400" />}{item.isProtected && <LockKeyhole aria-label={item.isLocked ? "Locked folder" : "Password protected"} className="size-3.5 shrink-0 text-muted-foreground" />}{item.publicToken && <Link2 aria-label="Public link enabled" className="size-3.5 shrink-0 text-primary" />}{item.scanStatus === "scanning" && <ScanningIndicator itemId={item.id} />}{(item.scanStatus === "suspicious" || item.scanStatus === "malicious") && <ShieldAlert aria-label={item.scanStatus === "malicious" ? "Flagged as malicious" : "Flagged as suspicious"} className="size-3.5 shrink-0 text-destructive" />}</>;
 }
 
-export function DriveItems({ items, view, selected, trash = false, disabled = false, onSelect, onOpen, onOpenIntent, onAction }: {
+export function DriveItems({ items, view, selected, trash = false, disabled = false, onSelect, onOpen, onOpenIntent, onAction, onMove }: {
   items: DriveItem[];
   view: "grid" | "list";
   selected: ReadonlySet<string>;
@@ -166,10 +175,20 @@ export function DriveItems({ items, view, selected, trash = false, disabled = fa
   onOpen: (item: DriveItem) => void;
   onOpenIntent: (item: DriveItem) => void;
   onAction: ItemActionHandler;
+  onMove?: (ids: string[], target: DropTarget) => void;
 }) {
+  const [dropOver, setDropOver] = useState<string | null | undefined>();
   const date = (value: string) => new Date(value).toLocaleDateString("en", { month: "short", day: "numeric", year: "numeric" });
   const selectedItems = items.filter((item) => selected.has(item.id));
   const targetsFor = (item: DriveItem) => selected.has(item.id) ? selectedItems : [item];
+  // Dragging a selected item carries the whole selection; unlocked folders accept drops.
+  const dragProps = (item: DriveItem) => !onMove || trash || disabled ? {} : {
+    draggable: true,
+    onDragStart: (event: DragEvent<HTMLElement>) => startItemDrag(event, targetsFor(item).map((target) => target.id)),
+    onDragEnd: () => { endItemDrag(); setDropOver(undefined); },
+    ...(item.kind === "folder" && !item.isLocked ? itemDropHandlers({ id: item.id, name: item.name }, { onMove, onOver: setDropOver }) : {}),
+  };
+  const dropping = (item: DriveItem) => dropOver === item.id && "bg-primary/10 ring-2 ring-primary/60 ring-inset";
   function activate(event: MouseEvent<HTMLButtonElement>, item: DriveItem) {
     if (event.shiftKey || event.ctrlKey || event.metaKey) onSelect(item.id, event.shiftKey);
     else onOpen(item);
@@ -177,7 +196,7 @@ export function DriveItems({ items, view, selected, trash = false, disabled = fa
   const checkbox = (item: DriveItem) => <Checkbox checked={selected.has(item.id)} disabled={disabled} aria-label={`Select ${item.name}`} onCheckedChange={(_checked, details) => onSelect(item.id, "shiftKey" in details.event && Boolean(details.event.shiftKey))} />;
   if (view === "grid") return (
     <ul aria-label={trash ? "Trashed files and folders" : "Files and folders"} className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-4 2xl:grid-cols-5">
-      {items.map((item) => <ItemContext key={item.id} targets={targetsFor(item)} trash={trash} disabled={disabled} onAction={onAction} render={<li data-drive-item={item.id} className={cn("group relative min-w-0 rounded-xl border border-border/70 bg-card hover:bg-accent/40 focus-within:bg-accent/40", selected.has(item.id) && "border-ring/60 bg-accent/50")} />}>
+      {items.map((item) => <ItemContext key={item.id} targets={targetsFor(item)} trash={trash} disabled={disabled} onAction={onAction} render={<li data-drive-item={item.id} {...dragProps(item)} className={cn("group relative min-w-0 rounded-xl border border-border/70 bg-card hover:bg-accent/40 focus-within:bg-accent/40", selected.has(item.id) && "border-ring/60 bg-accent/50", dropping(item))} />}>
         <div className="absolute left-3 top-4">{checkbox(item)}</div>
         <div className="absolute right-1 top-1"><ItemMenu item={item} targets={targetsFor(item)} trash={trash} disabled={disabled} onAction={onAction} /></div>
         <button disabled={disabled || (trash && item.kind === "file")} onClick={(event) => activate(event, item)} onMouseEnter={() => onOpenIntent(item)} onFocus={() => onOpenIntent(item)} className="flex w-full min-w-0 flex-col items-center rounded-xl px-3 pb-4 pt-11 text-center outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default">
@@ -200,7 +219,7 @@ export function DriveItems({ items, view, selected, trash = false, disabled = fa
         <th scope="col" className="hidden w-24 pb-3 pr-3 text-right font-medium sm:table-cell">Size</th>
         <th scope="col" className="w-10 pb-3"><span className="sr-only">Actions</span></th>
       </tr></thead>
-      <tbody>{items.map((item) => <ItemContext key={item.id} targets={targetsFor(item)} trash={trash} disabled={disabled} onAction={onAction} render={<tr data-drive-item={item.id} className={cn("group border-b border-border/45 last:border-0 hover:bg-accent/40 focus-within:bg-accent/40 active:bg-accent/60", selected.has(item.id) && "bg-accent/50")} />}>
+      <tbody>{items.map((item) => <ItemContext key={item.id} targets={targetsFor(item)} trash={trash} disabled={disabled} onAction={onAction} render={<tr data-drive-item={item.id} {...dragProps(item)} className={cn("group border-b border-border/45 last:border-0 hover:bg-accent/40 focus-within:bg-accent/40 active:bg-accent/60", selected.has(item.id) && "bg-accent/50", dropping(item))} />}>
         <td className="pl-2">{checkbox(item)}</td>
         <td className="p-0"><button disabled={disabled || (trash && item.kind === "file")} onClick={(event) => activate(event, item)} onMouseEnter={() => onOpenIntent(item)} onFocus={() => onOpenIntent(item)} className="flex w-full min-w-0 items-center gap-2 rounded-lg bg-transparent py-2.5 pl-1 pr-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-default">
           <DriveFileIcon item={item} /><span className="min-w-0"><span className="flex items-center gap-1.5"><span className="truncate font-medium" title={item.name}>{item.name}</span><ItemStatus item={item} /></span><span className="mt-0.5 block truncate text-xs text-muted-foreground md:hidden">{date(trash && item.trashedAt ? item.trashedAt : item.updatedAt)}{item.kind === "file" && <span className="sm:hidden"> · {formatBytes(item.size)}</span>}</span></span>

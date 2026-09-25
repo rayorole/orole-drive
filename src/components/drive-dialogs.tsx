@@ -20,6 +20,7 @@ import { DriveFileIcon, fileType, formatBytes } from "@/components/drive-item";
 import { PdfPreview } from "@/components/pdf-preview";
 import { TextPreview } from "@/components/text-preview";
 import { ShareQr } from "@/components/share-qr";
+import { ScanStatusLine } from "@/components/file-scan-badge";
 import { useFolderAccess } from "@/components/folder-access";
 
 export function useDriveDownload() {
@@ -92,6 +93,7 @@ export function DriveShareDialog({ item, onClose }: { item: DriveItem; onClose: 
     onSuccess: (nextUrl) => {
       setUrl(nextUrl);
       void queryClient.invalidateQueries({ queryKey: ["drive"] });
+      void queryClient.invalidateQueries({ queryKey: ["private-file-scan", item.id] });
       toast.success(nextUrl ? "Public link created" : "Public link revoked");
     },
   });
@@ -129,8 +131,9 @@ export function DriveShareDialog({ item, onClose }: { item: DriveItem; onClose: 
           <QrCode data-icon="inline-start" />{showQr ? "Hide QR code" : "Show QR code"}
         </Button>
         {showQr && <ShareQr url={url} />}
+        <ScanStatusLine itemId={item.id} />
       </div>}
-      {!url && !item.isProtected && <p className="text-xs text-muted-foreground">Your verified email appears on the public page. You can revoke the link at any time.</p>}
+      {!url && !item.isProtected && <p className="text-xs text-muted-foreground">Creating a link also sends the file to VirusTotal to scan it for viruses. Your verified email appears on the public page, and you can revoke the link at any time.</p>}
       {mutation.error && <p role="alert" className="text-sm text-destructive">{mutation.error.message}</p>}
       <DialogFooter className="sm:justify-between">
         {url

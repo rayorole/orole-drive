@@ -14,6 +14,8 @@ import { assertMoveDepth, folderPath, loadTree, MAX_FOLDER_DEPTH, selectedRows }
 import { MAX_UPLOAD_BYTES, MULTIPART_THRESHOLD_BYTES } from "@/lib/drive-types";
 import { abortMultipartUpload, commitUpload, createMultipartUpload, createObjectKey, createPublicToken, publicShareUrl, removeObject, removeStagedObject, signDownload, signUpload, toDriveItem } from "@/lib/storage";
 import { permanentlyDeleteDriveItems, restoreDriveItems, trashDriveItems } from "@/lib/trash";
+import { queueScanSubmission } from "@/lib/virus-scan-jobs";
+import { driveVirusScans } from "@/lib/virustotal-schema";
 
 const idSchema = z.uuid("Choose a valid file or folder.");
 const idsSchema = z.array(idSchema).min(1, "Choose at least one file or folder.").max(1000, "Choose up to 1,000 items at a time.").transform((ids) => [...new Set(ids)]);
@@ -127,8 +129,15 @@ export async function listDrive(input: DriveListInput = {}): Promise<ActionResul
       const favoriteScope = current ? [...rows, current] : rows;
       const favoriteIds = favoriteScope.length ? new Set((await tx.select({ id: driveFavorites.itemId }).from(driveFavorites)
         .where(and(eq(driveFavorites.userId, ctx.userId), inArray(driveFavorites.itemId, favoriteScope.map((row) => row.id))))).map((row) => row.id)) : new Set<string>();
+      const fileIds = rows.filter((row) => row.kind === "file").map((row) => row.id);
+      const scans = fileIds.length ? new Map((await tx.select({ id: driveVirusScans.itemId, status: driveVirusScans.status })
+        .from(driveVirusScans).where(inArray(driveVirusScans.itemId, fileIds))).map((scan) => [scan.id, scan.status])) : new Map<string, string>();
+      const scanStatus = (id: string) => {
+        const status = scans.get(id);
+        return status === "pending" ? "scanning" as const : status === "clean" || status === "suspicious" || status === "malicious" ? status : undefined;
+      };
       return {
-        items: rows.map((row) => ({ ...toDriveItem(row), ...access.get(row.id)!, isFavorite: favoriteIds.has(row.id) })),
+        items: rows.map((row) => ({ ...toDriveItem(row), ...access.get(row.id)!, isFavorite: favoriteIds.has(row.id), scanStatus: scanStatus(row.id) })),
         breadcrumbs: path.map(({ id, name }) => ({ id, name })),
         currentFolder: current ? { ...toDriveItem(current), ...access.get(current.id)!, isFavorite: favoriteIds.has(current.id) } : null,
         totalBytes: totals.totalBytes, totalFiles: totals.totalFiles,
@@ -269,7 +278,7 @@ export async function setPublic(input: { id: string; enabled: boolean; expiresIn
     const { id, enabled, expiresIn } = z.object({
       id: idSchema, enabled: z.boolean(), expiresIn: z.number().int().min(1).max(31_536_000, "Public links can expire up to one year from now.").optional(),
     }).parse(input);
-    return withDriveTransaction("write", async (tx) => {
+    const { url, created, row } = await withDriveTransaction("write", async (tx) => {
       const row = await requireItem(tx, ctx, id);
       if (row.kind !== "file") throw new DriveError("Only files can have public links. Share the files inside this folder instead.");
       if (enabled && !(await canAccessPublic(tx, row))) throw new DriveError("Files in password-protected folders cannot have public links.");
@@ -279,8 +288,11 @@ export async function setPublic(input: { id: string; enabled: boolean; expiresIn
       const publicExpiresAt = enabled ? (expiresIn === undefined ? (existing ? row.publicExpiresAt : null) : new Date(now.getTime() + expiresIn * 1000)) : null;
       const sharedByEmail = enabled ? (existing ? row.sharedByEmail : ctx.email) : null;
       await tx.update(driveItems).set({ publicToken, publicExpiresAt, sharedByEmail, updatedAt: now }).where(eq(driveItems.id, id));
-      return { url: publicToken ? publicShareUrl(publicToken) : null };
+      return { url: publicToken ? publicShareUrl(publicToken) : null, created: enabled && !existing, row };
     });
+    // A new public link sends the file to VirusTotal; the share dialog tells the user before they create it.
+    if (created) await queueScanSubmission(row).catch((error) => console.error(`Could not queue a virus scan for ${row.id}`, error));
+    return { url };
   }, "share");
 }
 
