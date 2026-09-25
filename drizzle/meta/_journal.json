@@ -71,6 +71,13 @@
       "when": 1790336945605,
       "tag": "0009_owner_access",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1790340000000,
+      "tag": "0010_storage_work",
+      "breakpoints": true
     }
   ]
 }

@@ -1,17 +1,17 @@
 "use server";
 
 import type { DriveContext } from "@/lib/drive-access";
-import type { ActionResult, DriveItem, DriveNameConflict, ResumableUpload, UploadResolution, UploadTicket } from "@/lib/drive-types";
+import type { ActionResult, ResumableUpload, UploadTicket } from "@/lib/drive-types";
 import { and, asc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
 import { driveAction, withDriveTransaction } from "@/lib/drive-access";
-import { idSchema, nameSchema, parentSchema, uploadKeySchema, uploadResolutionSchema } from "@/lib/drive-input";
+import { idSchema, mimeSchema, nameSchema, parentSchema, uploadKeySchema, uploadResolutionSchema } from "@/lib/drive-input";
 import { DriveError } from "@/lib/drive-errors";
 import { driveItems } from "@/lib/drive-schema";
-import { destinationSiblings, findConflicts } from "@/lib/name-conflicts";
-import { listUploadedParts, signUpload } from "@/lib/storage";
-import { assertUploadAccess, ensureUploadFolder, uploadDestination } from "@/lib/uploads";
+import { MAX_UPLOAD_BYTES } from "@/lib/drive-types";
+import { assertUploadAccess, ensureUploadFolders, startUpload, uploadTicket } from "@/lib/uploads";
+import type { UploadFolderRequest, UploadFolderResult, UploadRequest } from "@/lib/uploads";
 
 /** Unfinished uploads this member started (on any device) that can still finish before the 24-hour cleanup. */
 function resumableUploads(ctx: DriveContext) {
@@ -25,27 +25,29 @@ function resumableUploads(ctx: DriveContext) {
   );
 }
 
-/** Which of these files would clash with names already in the folder, so one prompt can cover a whole batch. */
-export async function findUploadConflicts(input: { parentId?: string | null; files: { key: string; name: string }[] }): Promise<ActionResult<DriveNameConflict[]>> {
+/** Bounded reservation batches return each actual reservation's ActionResult, including name conflicts. */
+export async function beginUploads(files: UploadRequest[]): Promise<ActionResult<{ key: string; result: ActionResult<UploadTicket> }[]>> {
   return driveAction(async (ctx) => {
-    const { parentId, files } = z.object({
-      parentId: parentSchema,
-      files: z.array(z.object({ key: uploadKeySchema, name: z.string().max(1024) })).max(1000, "Check up to 1,000 files at a time."),
-    }).parse(input);
-    return withDriveTransaction("read", async (tx) => {
-      await uploadDestination(tx, ctx, parentId);
-      return findConflicts(files.map((file) => ({ id: file.key, name: file.name.trim().normalize(), kind: "file" })), await destinationSiblings(tx, ctx, parentId));
+    const requestSchema = z.object({
+      key: uploadKeySchema, name: nameSchema, size: z.number().int().min(0).max(MAX_UPLOAD_BYTES),
+      mimeType: mimeSchema, parentId: parentSchema, resolution: uploadResolutionSchema.optional(),
     });
-  }, "read");
+    const requests = z.array(z.object({ key: uploadKeySchema }).passthrough()).min(1).max(20).parse(files);
+    const results: { key: string; result: ActionResult<UploadTicket> }[] = [];
+    for (const request of requests) {
+      results.push({ key: request.key, result: await driveAction(() => startUpload(ctx, requestSchema.parse(request))) });
+    }
+    return results;
+  });
 }
 
-/** Folder for a folder upload: merges into an existing folder with the same name instead of creating a duplicate. */
-export async function ensureFolder(input: { name: string; parentId?: string | null; key?: string; resolution?: UploadResolution }): Promise<ActionResult<{ folder: DriveItem; created: boolean }>> {
+/** Parents in the same chunk are referred to by key; earlier chunks use their returned folder IDs. */
+export async function ensureFolders(input: UploadFolderRequest[]): Promise<ActionResult<UploadFolderResult[]>> {
   return driveAction(async (ctx) => {
-    const { name, parentId, key, resolution } = z.object({
-      name: nameSchema, parentId: parentSchema, key: uploadKeySchema.optional(), resolution: uploadResolutionSchema.optional(),
-    }).parse(input);
-    return ensureUploadFolder(ctx, { key: key ?? name, name, parentId, resolution });
+    const requests = z.array(z.object({
+      name: nameSchema, parentId: parentSchema, key: uploadKeySchema, parentKey: uploadKeySchema.optional(), resolution: uploadResolutionSchema.optional(),
+    })).min(1).max(32).refine((rows) => new Set(rows.map((row) => row.key)).size === rows.length, "Choose distinct folder keys.").parse(input);
+    return ensureUploadFolders(ctx, requests);
   });
 }
 
@@ -83,20 +85,5 @@ export async function listResumableUploads(): Promise<ActionResult<ResumableUplo
 
 /** A fresh ticket for one of this member's unfinished uploads; multipart tickets skip the parts R2 already has. */
 export async function resumeUpload(id: string): Promise<ActionResult<UploadTicket>> {
-  return driveAction(async (ctx) => {
-    id = idSchema.parse(id);
-    return withDriveTransaction("read", async (tx) => {
-      const [row] = await tx.select().from(driveItems).where(and(eq(driveItems.id, id), resumableUploads(ctx)));
-      if (!row) throw new DriveError("This upload can no longer be resumed. Upload the file again.");
-      await assertUploadAccess(tx, ctx, row);
-      if (row.replacesId) {
-        const [file] = await tx.select().from(driveItems).where(eq(driveItems.id, row.replacesId));
-        if (!file || file.state !== "complete" || file.trashedAt || file.deletionStartedAt) {
-          throw new DriveError("This upload can no longer be resumed. Upload the file again.");
-        }
-        await assertUploadAccess(tx, ctx, file);
-      }
-      return signUpload(row, await listUploadedParts(row));
-    });
-  });
+  return driveAction(async (ctx) => uploadTicket(ctx, idSchema.parse(id), true));
 }

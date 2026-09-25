@@ -6,7 +6,7 @@ import {
   ArrowUp, Clock3, Download, File, Files, Folder, FolderInput, FolderPlus, FolderUp, HardDrive, LayoutGrid, Link2,
   History, List, Moon, PanelLeft, Plug, Search, Star, StarOff, Sun, Trash2,
 } from "lucide-react";
-import { listDrive } from "@/app/actions/drive";
+import { listDrive } from "@/lib/drive-read-client";
 import type { DriveFilter, DriveItem } from "@/lib/drive-types";
 import { canEditItem } from "@/lib/drive-permissions";
 import type { DriveItemAction } from "@/components/drive-item";
@@ -52,8 +52,8 @@ export function DriveCommandMenu({ filter, items, selected, canUpload, view, col
   const { resolvedTheme, setTheme } = useTheme();
   const recent = useQuery({
     queryKey: ["command-recent"],
-    queryFn: async () => {
-      const result = await listDrive({ filter: "recent" });
+    queryFn: async ({ signal }) => {
+      const result = await listDrive({ filter: "recent" }, signal);
       return result.success ? result.data.items.slice(0, 30) : [];
     },
     staleTime: 60_000,

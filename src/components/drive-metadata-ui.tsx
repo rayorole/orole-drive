@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { setFolderColor, setFolderEmoji, setItemDescription, setItemTags, toggleFavorite } from "@/app/actions/drive-metadata";
 import { FOLDER_COLORS } from "@/lib/drive-types";
 import type { DriveItem } from "@/lib/drive-types";
+import { invalidateDriveMetadata } from "@/lib/drive-cache";
 import { canEditItem, canManageItem, permissionLabel } from "@/lib/drive-permissions";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -37,7 +38,7 @@ export function DriveMetadataDialog({ item, onClose }: { item: DriveItem; onClos
   const [color, setColor] = useState<string | null>(item.folderColor);
   const [emoji, setEmoji] = useState(item.folderEmoji);
 
-  function invalidate() { void queryClient.invalidateQueries({ queryKey: ["drive"] }); }
+  function invalidate() { invalidateDriveMetadata(queryClient, [item.id]); }
 
   const favoriteMutation = useMutation({
     mutationFn: () => run(() => toggleFavorite(item.id)),

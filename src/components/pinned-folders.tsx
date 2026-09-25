@@ -4,7 +4,8 @@ import { createContext, useContext, useMemo, useState, type ReactNode } from "re
 import { useMutation, useQuery, useQueryClient, type UseMutationResult, type UseQueryResult } from "@tanstack/react-query";
 import { Info, LockKeyhole, Pin, PinOff, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
-import { listPinnedFolders, setFolderPinned } from "@/app/actions/pinned-folders";
+import { setFolderPinned } from "@/app/actions/pinned-folders";
+import { listPinnedFolders } from "@/lib/drive-read-client";
 import type { DriveItem } from "@/lib/drive-types";
 import { cn } from "@/lib/utils";
 import { useFolderAccess, DriveAccessError } from "@/components/folder-access";
@@ -29,8 +30,8 @@ function usePinsState() {
   const { run } = useFolderAccess();
   const query = useQuery({
     queryKey: pinsKey,
-    queryFn: async () => {
-      const result = await listPinnedFolders();
+    queryFn: async ({ signal }) => {
+      const result = await listPinnedFolders(signal);
       if (!result.success) throw new DriveAccessError(result.error, result.lockedFolder);
       return result.data;
     },

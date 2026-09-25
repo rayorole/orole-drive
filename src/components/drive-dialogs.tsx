@@ -5,12 +5,13 @@ import Image from "next/image";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, Download, Link2, Link2Off, QrCode, TriangleAlert, X } from "lucide-react";
 import { toast } from "sonner";
-import { createFolder, getDownloadUrl, getPreviewUrl, renameItem, setPublic } from "@/app/actions/drive";
-import { getItemSharing, listShareMembers, setItemSharing } from "@/app/actions/item-access";
+import { createFolder, renameItem, setPublic } from "@/app/actions/drive";
+import { setItemSharing } from "@/app/actions/item-access";
+import { getDownloadUrl, getPreviewUrl, getItemSharing, listShareMembers } from "@/lib/drive-read-client";
 import type { DriveAccessMode, DriveItem, ItemSharing } from "@/lib/drive-types";
 import { canManageItem, permissionLabel } from "@/lib/drive-permissions";
 import { getPreviewKind, isOfficeKind } from "@/lib/file-preview";
-import { optimisticDriveChange } from "@/lib/drive-cache";
+import { invalidateDriveMetadata, optimisticDriveChange } from "@/lib/drive-cache";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
@@ -57,7 +58,12 @@ export function DriveNameDialog({ item, parentId, onClose }: { item?: DriveItem;
     },
     onMutate: async () => item ? { rollback: await optimisticDriveChange(queryClient, { kind: "rename", id: item.id, name: name.trim() }) } : undefined,
     onError: (_error, _variables, context) => context?.rollback(),
-    onSettled: () => { void queryClient.invalidateQueries({ queryKey: ["drive"] }); },
+    onSettled: () => {
+      if (item) {
+        invalidateDriveMetadata(queryClient, [item.id]);
+        void queryClient.invalidateQueries({ queryKey: ["storage-usage"] });
+      } else void queryClient.invalidateQueries({ queryKey: ["drive"] });
+    },
     onSuccess: () => {
       toast.success(item ? "Name updated" : "Folder created");
       onClose();
@@ -98,7 +104,7 @@ export function DriveShareDialog({ item, onClose }: { item: DriveItem; onClose: 
   const owner = canManageItem(item);
   const sharing = useQuery({
     queryKey: ["drive-sharing", item.id],
-    queryFn: () => run(() => getItemSharing(item.id)),
+    queryFn: ({ signal }) => run(() => getItemSharing(item.id, signal)),
     enabled: owner,
     retry: false,
     staleTime: 0,
@@ -148,7 +154,7 @@ function OwnerShareDialog({ item, initial, onClose }: { item: DriveItem; initial
   const [showQr, setShowQr] = useState(false);
   const accounts = useQuery({
     queryKey: ["drive-share-members"],
-    queryFn: () => run(() => listShareMembers()),
+    queryFn: ({ signal }) => run(() => listShareMembers(signal)),
     enabled: mode === "selected",
     retry: false,
     staleTime: 60_000,
@@ -156,9 +162,10 @@ function OwnerShareDialog({ item, initial, onClose }: { item: DriveItem; initial
   const results = accounts.data?.filter((account) => account.id !== item.owner?.id && !members.some((member) => member.id === account.id) && `${account.name} ${account.email}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())) ?? [];
   const modes = (["private", ...(initial.hasParent ? ["inherit" as const] : []), "members", "selected", "public"] as const).map((value) => ({ value, label: ACCESS_LABELS[value] }));
   const expiryItems = expiresAt ? [{ value: "current", label: `Until ${new Date(expiresAt).toLocaleString("en", { dateStyle: "medium", timeStyle: "short" })}` }, ...EXPIRY_OPTIONS] : EXPIRY_OPTIONS;
-  function invalidate() {
-    void queryClient.invalidateQueries({ queryKey: ["drive"] });
-    void queryClient.invalidateQueries({ queryKey: ["command-recent"] });
+  function invalidate(sharing: ItemSharing = saved) {
+    // The owner keeps the freshly saved sharing dialog (and its copyable link), never other cached access.
+    queryClient.setQueryData(["drive-sharing", item.id], sharing);
+    window.dispatchEvent(new CustomEvent("drive-access-changed", { detail: { keepSharingId: item.id } }));
   }
   const access = useMutation({
     mutationFn: () => {
@@ -173,7 +180,7 @@ function OwnerShareDialog({ item, initial, onClose }: { item: DriveItem; initial
       setExpiry("never");
       setShowQr(false);
       toast.success(url ? "Access saved and public link revoked" : "Access saved");
-      invalidate();
+      invalidate(result);
     },
   });
   const link = useMutation({
@@ -273,7 +280,7 @@ export function DrivePreviewDialog({ item, onClose }: { item: DriveItem; onClose
   const preview = useQuery({
     queryKey: ["drive-preview", item.id, item.name],
     queryFn: async ({ signal }) => {
-      const result = await run(() => getPreviewUrl(item.id));
+      const result = await run(() => getPreviewUrl(item.id, signal));
       signal.throwIfAborted();
       return result.url;
     },

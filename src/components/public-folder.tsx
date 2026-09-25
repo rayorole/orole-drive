@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useMutation } from "@tanstack/react-query";
 import { Archive, Check, ChevronRight, Download, File, FileImage, FileMusic, FileText, FileVideo, Folder, Link2 } from "lucide-react";
 import { toast } from "sonner";
-import { getPublicFolderArchive, getPublicFolderFileAccess } from "@/app/actions/public";
+import { getPublicFolderArchive, getPublicFolderFileAccess } from "@/lib/drive-read-client";
 import { useArchiveDownloader, type ArchiveSource } from "@/components/drive-archive";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/spinner";
@@ -53,8 +53,8 @@ export function PublicFolder({ token, view }: { token: string; view: PublicFolde
   const current = view.breadcrumbs[view.breadcrumbs.length - 1];
   const [linkCopied, setLinkCopied] = useState(false);
   const source = useMemo<ArchiveSource>(() => ({
-    getManifest: async ([folderId]) => unwrap(await getPublicFolderArchive(token, folderId)),
-    getDownloadUrl: async (id) => unwrap(await getPublicFolderFileAccess(token, id)).downloadUrl,
+    getManifest: async ([folderId], signal) => unwrap(await getPublicFolderArchive(token, folderId, signal)),
+    getDownloadUrl: async (id, signal) => unwrap(await getPublicFolderFileAccess(token, id, signal)).downloadUrl,
   }), [token]);
   const archive = useArchiveDownloader(source);
   const download = useMutation({

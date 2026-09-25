@@ -7,10 +7,10 @@ import type { ActionResult, DriveArchiveManifest, DriveItem, DriveListInput, Dri
 import { randomUUID } from "node:crypto";
 // Aliased: `after` is also the listing's "modified after" date filter.
 import { after as afterResponse } from "next/server";
-import { and, arrayContains, asc, desc, eq, gte, ilike, inArray, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
+import { and, arrayContains, asc, desc, eq, getTableColumns, gte, ilike, inArray, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
 import { z } from "zod";
-import { assertItemAccess, assertItemsAccess, canAccessPublic, driveAction, getItemAccess, getItemsAccess, visibleItemsCondition, withDriveTransaction } from "@/lib/drive-access";
-import { discoverableRootsCondition, tryItemsAccess } from "@/lib/drive-access";
+import { assertItemAccess, assertItemsAccess, canAccessPublic, driveAction, getItemAccess, getListingAccess, visibleItemsCondition, withDriveTransaction } from "@/lib/drive-access";
+import { discoverableRootsCondition } from "@/lib/drive-access";
 import { DriveError } from "@/lib/drive-errors";
 import { driveFavorites, driveItems } from "@/lib/drive-schema";
 import { assertMoveDepth, childFirst, folderPath, loadTree, MAX_FOLDER_DEPTH, selectedRows } from "@/lib/drive-tree";
@@ -76,17 +76,31 @@ export async function listDrive(input: DriveListInput = {}): Promise<ActionResul
     return withDriveTransaction("read", async (tx) => {
       const { folderId, filter, search, type, minSize, maxSize, after, before, foldersOnly, tags } = parsed;
       const trash = filter === "trash" && !foldersOnly;
-      const path = await folderPath(tx, folderId);
+      const isFavorite = sql<boolean>`exists (select 1 from ${driveFavorites}
+        where ${driveFavorites.itemId} = ${driveItems.id} and ${driveFavorites.userId} = ${ctx.userId})`;
+      // Load the whole path once, keeping the same cycle/depth and folder checks
+      // as folderPath without one network roundtrip per ancestor.
+      const ancestors = folderId ? await tx.select({ ...getTableColumns(driveItems), isFavorite }).from(driveItems).where(sql`${driveItems.id} in (
+        with recursive path as (
+          select id, parent_id from drive_items where id = ${folderId}::uuid
+          union
+          select parent.id, parent.parent_id from drive_items parent join path child on child.parent_id = parent.id
+        ) select id from path
+      )`) : [];
+      const ancestorsById = new Map(ancestors.map((row) => [row.id, row]));
+      const path: typeof ancestors = [];
+      const seen = new Set<string>();
+      let cursor = folderId?.toLowerCase() ?? null;
+      while (cursor) {
+        if (seen.has(cursor) || path.length >= MAX_FOLDER_DEPTH) throw new DriveError("Folders can be nested up to 64 levels deep.");
+        seen.add(cursor);
+        const folder = ancestorsById.get(cursor);
+        if (!folder || folder.kind !== "folder" || folder.state !== "complete") throw new DriveError("The destination folder is no longer available.");
+        path.push(folder);
+        cursor = folder.parentId;
+      }
+      path.reverse();
       const current = path.at(-1);
-      if (current) {
-        await assertItemAccess(tx, ctx, current, { allowTrashed: trash });
-        if (trash && (!current.trashedAt || current.deletionStartedAt)) throw new DriveError("This folder is not in Trash.");
-      }
-      const pathAccess = await tryItemsAccess(tx, ctx, path.map((row) => row.id), { allowTrashed: trash });
-      let safePathStart = 0;
-      for (let index = 0; index < path.length; index += 1) {
-        if (!pathAccess.get(path[index].id)) safePathStart = index + 1;
-      }
       const global = !foldersOnly && Boolean(search || type !== "all" || minSize !== undefined || maxSize !== undefined || after || before || tags?.length);
       const conditions: SQL[] = [eq(driveItems.state, "complete"), visibleItemsCondition(ctx, { trash })];
       // Rows being permanently deleted leave Trash immediately; their removal finishes in the background.
@@ -120,34 +134,34 @@ export async function listDrive(input: DriveListInput = {}): Promise<ActionResul
       const sortColumn = filter === "recent" && parsed.sort === undefined ? recentActivityColumn
         : sort === "name" ? sql`lower(${driveItems.name})` : sort === "updatedAt" ? driveItems.updatedAt : sort === "size" ? driveItems.size : itemType;
       const ordering = sort === "name" ? [desc(driveItems.kind), order(sortColumn), asc(driveItems.id)] : [order(sortColumn), asc(sql`lower(${driveItems.name})`), asc(driveItems.id)];
-      const query = tx.select().from(driveItems).where(and(...conditions)).orderBy(...ordering);
-      const rows = filter === "recent" && !global ? await query.limit(100) : await query;
-      const access = await getItemsAccess(tx, ctx, current ? [...rows, current] : rows);
-      const favoriteScope = current ? [...rows, current] : rows;
-      const favoriteIds = favoriteScope.length ? new Set((await tx.select({ id: driveFavorites.itemId }).from(driveFavorites)
-        .where(and(eq(driveFavorites.userId, ctx.userId), inArray(driveFavorites.itemId, favoriteScope.map((row) => row.id))))).map((row) => row.id)) : new Set<string>();
-      const fileIds = rows.filter((row) => row.kind === "file").map((row) => row.id);
-      const scans = fileIds.length ? new Map((await tx.select({ id: driveVirusScans.itemId, status: driveVirusScans.status })
-        .from(driveVirusScans).where(inArray(driveVirusScans.itemId, fileIds))).map((scan) => [scan.id, scan.status])) : new Map<string, string>();
-      const risks = new Map<string, { level: "low" | "medium" | "high"; signals: string[] }>(fileIds.length ? (await tx.select({ id: driveFileRisks.itemId, level: driveFileRisks.level, signals: driveFileRisks.signals })
-        .from(driveFileRisks).where(inArray(driveFileRisks.itemId, fileIds))).map((risk) => [risk.id, risk]) : []);
-      const scanStatus = (id: string) => {
-        const status = scans.get(id);
-        return status === "pending" ? "scanning" as const : status === "clean" || status === "suspicious" || status === "malicious" ? status : undefined;
-      };
-      // Suggest a scan only while there's no result to show instead.
-      const scanSuggestion = (id: string) => {
-        const risk = risks.get(id);
-        if (!risk || (risk.level !== "medium" && risk.level !== "high") || scanStatus(id)) return undefined;
-        return { level: risk.level, reasons: risk.signals.flatMap((signal) => SIGNAL_LABELS[signal as FileRiskSignal] ?? []) };
-      };
+      const query = tx.select({
+        item: driveItems,
+        isFavorite,
+        scanStatus: driveVirusScans.status,
+        riskLevel: driveFileRisks.level,
+        riskSignals: driveFileRisks.signals,
+      }).from(driveItems)
+        .leftJoin(driveVirusScans, and(eq(driveItems.kind, "file"), eq(driveVirusScans.itemId, driveItems.id)))
+        .leftJoin(driveFileRisks, and(eq(driveItems.kind, "file"), eq(driveFileRisks.itemId, driveItems.id)))
+        .where(and(...conditions)).orderBy(...ordering);
+      const listed = filter === "recent" && !global ? await query.limit(100) : await query;
+      // Authorization is evaluated before returning any row, breadcrumb, or
+      // background work, with one fresh ancestor snapshot shared by the listing.
+      const { access, breadcrumbs } = await getListingAccess(tx, ctx, listed.map(({ item }) => item), path, trash);
       // Never assessed: score them after this response. Protected folders stay private, even their file names.
-      const unassessed = rows.filter((row) => row.kind === "file" && !risks.has(row.id) && !access.get(row.id)!.isProtected).slice(0, RISK_BACKFILL_PER_LISTING).map((row) => row.id);
+      const unassessed = listed.filter(({ item, riskLevel }) => item.kind === "file" && riskLevel === null && !access.get(item.id)!.isProtected).slice(0, RISK_BACKFILL_PER_LISTING).map(({ item }) => item.id);
       if (unassessed.length) afterResponse(() => prioritizeScans(unassessed));
       return {
-        items: rows.map((row) => ({ ...toDriveItem(row), ...access.get(row.id)!, isFavorite: favoriteIds.has(row.id), scanStatus: scanStatus(row.id), scanSuggestion: scanSuggestion(row.id) })),
-        breadcrumbs: path.slice(safePathStart).map(({ id, name }) => ({ id, name, permission: pathAccess.get(id)!.permission })),
-        currentFolder: current ? { ...toDriveItem(current), ...access.get(current.id)!, isFavorite: favoriteIds.has(current.id) } : null,
+        items: listed.map(({ item, isFavorite, scanStatus: status, riskLevel, riskSignals }) => {
+          const scanStatus = status === "pending" ? "scanning" as const : status === "clean" || status === "suspicious" || status === "malicious" ? status : undefined;
+          // Suggest a scan only while there's no result to show instead.
+          const scanSuggestion = !scanStatus && (riskLevel === "medium" || riskLevel === "high")
+            ? { level: riskLevel, reasons: (riskSignals ?? []).flatMap((signal) => SIGNAL_LABELS[signal as FileRiskSignal] ?? []) }
+            : undefined;
+          return { ...toDriveItem(item), ...access.get(item.id)!, isFavorite, scanStatus, scanSuggestion };
+        }),
+        breadcrumbs,
+        currentFolder: current ? { ...toDriveItem(current), ...access.get(current.id)!, isFavorite: current.isFavorite } : null,
       };
     });
   }, "read");

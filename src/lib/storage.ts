@@ -9,20 +9,36 @@ import {
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  ListMultipartUploadsCommand,
   ListPartsCommand,
   PutObjectCommand,
   S3Client,
   UploadPartCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { and, eq, isNotNull, lte, or, sql } from "drizzle-orm";
-import type { DriveFileVersionRow, DriveRow } from "@/lib/drive-schema";
+import { and, eq, inArray, isNotNull, lte, or, sql } from "drizzle-orm";
+import type { DriveFileVersionRow, DriveRow, UploadWorkRow } from "@/lib/drive-schema";
 import type { DriveItem, UploadTicket } from "@/lib/drive-types";
 import { withDriveTransaction } from "@/lib/drive-access";
+import { getDb } from "@/lib/db";
 import { DriveError } from "@/lib/drive-errors";
-import { driveItems } from "@/lib/drive-schema";
-import { MULTIPART_PART_BYTES } from "@/lib/drive-types";
+import { driveItems, driveUploadWork } from "@/lib/drive-schema";
+import { MULTIPART_PART_BYTES, MULTIPART_THRESHOLD_BYTES } from "@/lib/drive-types";
+import { withStorageObjectLock } from "@/lib/storage-work";
+import type { DriveTransaction } from "@/lib/drive-access";
 import { getPreviewKind } from "@/lib/file-preview";
+
+/** Lazy reconciliation covers uploads reserved by the previous deployment after migration. */
+export async function ensureUploadWork(tx: DriveTransaction, row: DriveRow) {
+  if (row.kind !== "file" || row.state !== "pending" || !row.objectKey || !row.mimeType) return;
+  await tx.insert(driveUploadWork).values({
+    id: row.id, itemId: row.replacesId ?? row.id, objectKey: row.objectKey, multipartUploadId: row.multipartUploadId,
+    multipart: row.multipartUploadId !== null, size: row.size, mimeType: row.mimeType, createdAt: row.createdAt,
+    retainUntil: new Date(Date.now() + 25 * 60 * 60 * 1000),
+  }).onConflictDoNothing();
+  if (row.multipartUploadId) await tx.update(driveUploadWork).set({ multipartUploadId: row.multipartUploadId, multipart: true })
+    .where(and(eq(driveUploadWork.id, row.id), eq(driveUploadWork.status, "pending")));
+}
 
 const DOWNLOAD_TTL_SECONDS = 60;
 const UPLOAD_TTL_SECONDS = 60 * 60;
@@ -93,7 +109,14 @@ export function createObjectKey(id: string) {
 
 const OBJECT_KEY_PATTERN = /^files\/[0-9a-f-]{36}\/[0-9a-f]{48}$/;
 
-function objectKey(row: DriveRow): string {
+export type UploadObject = Pick<DriveRow, "id" | "kind" | "objectKey" | "replacesId" | "multipartUploadId" | "mimeType" | "size" | "state" | "trashedAt">;
+
+export function uploadWorkObject(work: UploadWorkRow): UploadObject {
+  return { id: work.id, kind: "file", objectKey: work.objectKey, replacesId: work.itemId === work.id ? null : work.itemId,
+    multipartUploadId: work.multipartUploadId, mimeType: work.mimeType, size: work.size, state: "pending", trashedAt: null };
+}
+
+function objectKey(row: UploadObject): string {
   // A pending replacement upload stores its bytes under the file it will become a version of.
   if (
     row.kind !== "file" || !row.objectKey ||
@@ -112,14 +135,17 @@ function versionObjectKey(version: DriveFileVersionRow): string {
   return version.objectKey;
 }
 
-function stagedObjectKey(row: DriveRow) {
+function stagedObjectKey(row: UploadObject) {
   return `uploads/${objectKey(row).slice("files/".length)}`;
 }
 
-export async function createMultipartUpload(row: DriveRow): Promise<string> {
+export async function createMultipartUpload(row: UploadObject): Promise<string> {
   if (row.state !== "pending" || row.trashedAt || !row.mimeType) {
     throw new DriveError("This upload is no longer available.");
   }
+  // If initiation reached R2 but its response never reached the journal, retire
+  // those unsignable uploads before retrying under this object's exclusive claim.
+  await abortUnrecordedMultipart(row);
   const { client, bucket } = storage();
   const upload = await client.send(new CreateMultipartUploadCommand({
     Bucket: bucket,
@@ -131,7 +157,7 @@ export async function createMultipartUpload(row: DriveRow): Promise<string> {
   return upload.UploadId;
 }
 
-export async function abortMultipartUpload(row: DriveRow) {
+export async function abortMultipartUpload(row: UploadObject) {
   if (!row.multipartUploadId) return;
   const { client, bucket } = storage();
   try {
@@ -145,12 +171,12 @@ export async function abortMultipartUpload(row: DriveRow) {
   }
 }
 
-function partSize(row: DriveRow, partNumber: number) {
+function partSize(row: UploadObject, partNumber: number) {
   return Math.min(MULTIPART_PART_BYTES, row.size - (partNumber - 1) * MULTIPART_PART_BYTES);
 }
 
 /** Signs the upload; for multipart, only the parts not in `completedParts` (a resumed upload skips what R2 already has). */
-export async function signUpload(row: DriveRow, completedParts: number[] = []): Promise<UploadTicket> {
+export async function signUpload(row: UploadObject, completedParts: number[] = []): Promise<UploadTicket> {
   if (row.state !== "pending" || row.trashedAt || !row.mimeType) {
     throw new DriveError("This upload is no longer available.");
   }
@@ -201,7 +227,7 @@ export async function signUpload(row: DriveRow, completedParts: number[] = []): 
  * (re)sent, and re-sending a part number replaces it. When the multipart upload is gone because R2 already
  * completed it, every part counts as sent so the client goes straight to completion, which verifies the object.
  */
-export async function listUploadedParts(row: DriveRow): Promise<number[]> {
+export async function listUploadedParts(row: UploadObject): Promise<number[]> {
   if (!row.multipartUploadId) return [];
   const { client, bucket } = storage();
   const partCount = Math.ceil(row.size / MULTIPART_PART_BYTES);
@@ -220,7 +246,7 @@ export async function listUploadedParts(row: DriveRow): Promise<number[]> {
   return Array.from({ length: partCount }, (_, index) => index + 1);
 }
 
-export async function verifyUpload(row: DriveRow, finalized = false): Promise<string> {
+export async function verifyUpload(row: UploadObject, finalized = false): Promise<string> {
   const { client, bucket } = storage();
   let head;
   try {
@@ -243,7 +269,7 @@ export async function verifyUpload(row: DriveRow, finalized = false): Promise<st
   return head.ETag;
 }
 
-async function commitMultipartUpload(row: DriveRow, uploadId: string): Promise<string> {
+async function commitMultipartUpload(row: UploadObject, uploadId: string): Promise<string> {
   const { client, bucket } = storage();
   const key = objectKey(row);
   try {
@@ -278,20 +304,27 @@ async function commitMultipartUpload(row: DriveRow, uploadId: string): Promise<s
   return verifyUpload(row, true);
 }
 
-export async function commitUpload(row: DriveRow): Promise<string> {
+export async function commitUpload(row: UploadObject, publicationKey: string): Promise<string> {
   if (row.state !== "pending" || row.trashedAt) throw new DriveError("This upload is no longer available.");
   // Persisted mode preserves older large uploads that still use the single PUT path.
-  if (row.multipartUploadId) return commitMultipartUpload(row, row.multipartUploadId);
+  if (row.multipartUploadId) {
+    if (publicationKey !== row.objectKey) throw new DriveError("This upload has changed. Please try again.");
+    return commitMultipartUpload(row, row.multipartUploadId);
+  }
+  // Legacy finalizers may still publish row.objectKey while this worker is in R2.
+  // Their valid PUT ticket must never let us overwrite those published bytes.
+  if (publicationKey === row.objectKey) throw new DriveError("This upload has no isolated publication identity.");
+  const publication = { ...row, objectKey: publicationKey };
   const { client, bucket } = storage();
   const stagedEtag = await verifyUpload(row);
   await client.send(new CopyObjectCommand({
     Bucket: bucket,
-    Key: objectKey(row),
+    Key: objectKey(publication),
     CopySource: `${encodeURIComponent(bucket)}/${stagedObjectKey(row)}`,
     CopySourceIfMatch: stagedEtag,
     MetadataDirective: "COPY",
   }));
-  return verifyUpload(row, true);
+  return verifyUpload(publication, true);
 }
 
 /**
@@ -313,19 +346,20 @@ export async function copyFileObject(source: DriveRow, target: DriveRow): Promis
   return verifyUpload(target, true);
 }
 
-export async function removeStagedObject(row: DriveRow) {
+export async function removeStagedObject(row: UploadObject) {
   if (row.multipartUploadId) return;
   const { client, bucket } = storage();
   await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagedObjectKey(row) }));
 }
 
-export async function removeObject(row: DriveRow) {
+export async function removeObject(row: UploadObject) {
   await abortMultipartUpload(row);
   const { client, bucket } = storage();
   // A pending row may already have a final object if a completion transaction failed.
   await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: objectKey(row) }));
   await removeStagedObject(row);
   await removeThumbnail(row.id);
+  await removeContentThumbnail(row.replacesId ?? row.id, objectKey(row));
 }
 
 /** Drops a file's cached preview thumbnail, e.g. after its contents change. */
@@ -334,9 +368,33 @@ export async function removeThumbnail(itemId: string) {
   await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: thumbnailKey(`thumbnails/${itemId}/preview-v1.webp`) }));
 }
 
+/** Derivatives belong to immutable content, not the mutable current-file pointer. */
+export function contentThumbnailKey(itemId: string, key: string) {
+  return thumbnailKey(`thumbnails/${itemId}/${key.split("/").at(-1)}-v2.webp`);
+}
+
+async function removeContentThumbnail(itemId: string, key: string) {
+  const { client, bucket } = storage();
+  await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: contentThumbnailKey(itemId, key) }));
+}
+
 export async function removeVersionObject(version: DriveFileVersionRow) {
   const { client, bucket } = storage();
   await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: versionObjectKey(version) }));
+  await removeContentThumbnail(version.itemId, version.objectKey);
+}
+
+/** Queue retired versions before their relational reference disappears. */
+export async function queueVersionCleanup(tx: DriveTransaction, version: DriveFileVersionRow) {
+  await tx.insert(driveUploadWork).values({
+    id: version.id, itemId: version.itemId, objectKey: version.objectKey, size: version.size, mimeType: version.mimeType,
+    status: "cancelled", retainUntil: new Date(Date.now() + 25 * 60 * 60 * 1000),
+  }).onConflictDoUpdate({ target: driveUploadWork.objectKey, set: { status: "cancelled" } });
+}
+
+export async function cleanupVersion(version: DriveFileVersionRow) {
+  const [work] = await getDb().select({ id: driveUploadWork.id }).from(driveUploadWork).where(eq(driveUploadWork.objectKey, version.objectKey));
+  if (work) await cleanupUpload(work.id);
 }
 
 /** Short-lived download link for an earlier version, named after the file. */
@@ -351,22 +409,105 @@ export async function signVersionDownload(version: DriveFileVersionRow, name: st
   }), { expiresIn: DOWNLOAD_TTL_SECONDS });
 }
 
-export async function pruneExpiredUploads() {
+/** A crash between R2 initiation and persisting its response must not leak multipart uploads. */
+async function abortUnrecordedMultipart(row: UploadObject) {
+  if (row.size < MULTIPART_THRESHOLD_BYTES) return;
+  const { client, bucket } = storage();
+  let keyMarker: string | undefined;
+  let uploadIdMarker: string | undefined;
+  do {
+    const page = await client.send(new ListMultipartUploadsCommand({
+      Bucket: bucket, Prefix: objectKey(row), KeyMarker: keyMarker, UploadIdMarker: uploadIdMarker,
+    }));
+    for (const upload of page.Uploads ?? []) {
+      if (upload.Key === objectKey(row) && upload.UploadId && upload.UploadId !== row.multipartUploadId) await abortMultipartUpload({ ...row, multipartUploadId: upload.UploadId });
+    }
+    if (!page.IsTruncated) break;
+    keyMarker = page.NextKeyMarker;
+    uploadIdMarker = page.NextUploadIdMarker;
+  } while (keyMarker);
+}
+
+/** All durable references count, regardless of which deployment published the bytes. */
+export async function referencedObjectKeys(tx: DriveTransaction, keys: string[]): Promise<Set<string>> {
+  const list = sql.join(keys.map((key) => sql`${key}`), sql`, `);
+  const rows = await tx.execute<{ key: string }>(sql`
+    select object_key as key from drive_items where object_key in (${list}) and state = 'complete'
+    union select object_key as key from drive_file_versions where object_key in (${list})
+  `);
+  return new Set(rows.map((row) => row.key));
+}
+
+/** Reconciles both legacy and isolated publication identities before retiring any bytes. */
+export async function cleanupUpload(id: string) {
+  const [snapshot] = await getDb().select().from(driveUploadWork).where(eq(driveUploadWork.id, id));
+  if (!snapshot) return;
+  const plan = await withStorageObjectLock(snapshot.objectKey, async () => {
+    const plan = await withDriveTransaction("write", async (tx) => {
+      const [work] = await tx.select().from(driveUploadWork).where(eq(driveUploadWork.id, id));
+      if (!work) return null;
+      const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id));
+      if (work.status === "pending" && row?.state === "pending" && !row.trashedAt && !row.deletionStartedAt && row.createdAt.getTime() > Date.now() - 86_400_000) return null;
+      const referenced = await referencedObjectKeys(tx, [work.objectKey, ...(work.publicationKey ? [work.publicationKey] : [])]);
+      const status = referenced.size ? "published" as const : "cancelled" as const;
+      await tx.update(driveUploadWork).set({ status }).where(eq(driveUploadWork.id, id));
+      if (row?.state === "pending" && row.objectKey === work.objectKey) await tx.update(driveItems).set({ deletionStartedAt: new Date() }).where(eq(driveItems.id, id));
+      return { work: { ...work, status }, referenced };
+    });
+    if (!plan) return null;
+    const object = uploadWorkObject(plan.work);
+    // A legacy single-PUT finalizer can win while new multipart initiation is in
+    // flight. Abort that unsignable multipart even when its final key is referenced.
+    await abortUnrecordedMultipart(object);
+    if (!plan.referenced.has(plan.work.objectKey)) {
+      await removeObject(object);
+    } else {
+      await abortMultipartUpload(object);
+      if (plan.work.retainUntil.getTime() <= Date.now()) {
+        // A replayed PUT can recreate staging, never remove its published final object.
+        await removeStagedObject(object);
+      }
+    }
+    return plan;
+  });
+  if (!plan) return;
+  const { work } = plan;
+  if (work.publicationKey && !plan.referenced.has(work.publicationKey)) {
+    const publicationKey = work.publicationKey;
+    // Never nest object claims: a busy thumbnail must not exhaust the claim pool.
+    await withStorageObjectLock(publicationKey, async () => {
+      const referenced = await withDriveTransaction("read", (tx) => referencedObjectKeys(tx, [publicationKey]));
+      if (!referenced.has(publicationKey)) await removeObject({ ...uploadWorkObject(work), objectKey: publicationKey, multipartUploadId: null });
+    });
+  }
   await withDriveTransaction("write", async (tx) => {
+    await tx.delete(driveItems).where(and(eq(driveItems.id, id), eq(driveItems.objectKey, work.objectKey), eq(driveItems.state, "pending"), isNotNull(driveItems.deletionStartedAt)));
+    // Keep both identities through ticket expiry, and until every cleanup step succeeds.
+    if (work.retainUntil.getTime() <= Date.now()) await tx.delete(driveUploadWork).where(and(eq(driveUploadWork.id, id), eq(driveUploadWork.status, work.status)));
+  });
+}
+
+export async function pruneExpiredUploads() {
+  const ids = await withDriveTransaction("write", async (tx) => {
     const expired = await tx.select().from(driveItems).where(and(
       eq(driveItems.state, "pending"),
-      or(isNotNull(driveItems.trashedAt), lte(driveItems.createdAt, sql`now() - interval '24 hours'`)),
-    )).limit(100).for("update");
-    for (const row of expired) {
-      try {
-        await removeObject(row);
-      } catch {
-        // Keep the pending tombstone so a later cleanup can safely retry.
-        continue;
-      }
-      await tx.delete(driveItems).where(eq(driveItems.id, row.id));
+      or(isNotNull(driveItems.trashedAt), isNotNull(driveItems.deletionStartedAt), lte(driveItems.createdAt, sql`now() - interval '24 hours'`)),
+    )).limit(100);
+    for (const row of expired) await ensureUploadWork(tx, row);
+    if (expired.length) {
+      const ids = expired.map((row) => row.id);
+      await tx.update(driveUploadWork).set({ status: "cancelled" }).where(and(inArray(driveUploadWork.id, ids), eq(driveUploadWork.status, "pending")));
+      await tx.update(driveItems).set({ deletionStartedAt: new Date() }).where(inArray(driveItems.id, ids));
     }
+    return expired.map((row) => row.id);
   });
+  const abandoned = await getDb().select({ id: driveUploadWork.id }).from(driveUploadWork).where(or(
+    eq(driveUploadWork.status, "cancelled"),
+    and(eq(driveUploadWork.status, "pending"), sql`not exists (select 1 from drive_items item where item.id = ${driveUploadWork.id} and item.state = 'pending')`),
+  )).limit(100);
+  for (const id of new Set([...ids, ...abandoned.map((row) => row.id)])) await cleanupUpload(id).catch(() => undefined);
+  const published = await getDb().select().from(driveUploadWork).where(and(eq(driveUploadWork.status, "published"), lte(driveUploadWork.retainUntil, new Date()))).limit(100);
+  for (const work of published) await cleanupUpload(work.id).catch(() => undefined);
 }
 
 function contentDisposition(name: string, inline: boolean) {
@@ -424,7 +565,7 @@ export async function readFileBytes(row: DriveRow, maxBytes: number): Promise<Ui
 }
 
 function thumbnailKey(key: string): string {
-  if (!/^thumbnails\/[0-9a-f-]{36}\/preview-v1\.webp$/.test(key)) {
+  if (!/^thumbnails\/[0-9a-f-]{36}\/(?:preview-v1|[0-9a-f]{48}-v2)\.webp$/.test(key)) {
     throw new DriveError("This thumbnail is not available.");
   }
   return key;

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Archive, Check, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
-import { getArchiveManifest, getDownloadUrl } from "@/app/actions/drive";
+import { getArchiveManifest, getDownloadUrl } from "@/lib/drive-read-client";
 import { downloadArchive, waitForArchiveOperation } from "@/lib/archive-download";
 import type { ArchiveProgress } from "@/lib/archive-download";
 import type { DriveArchiveManifest } from "@/lib/drive-types";
@@ -39,12 +39,12 @@ export function useArchiveDownload(): ArchiveDownloadHook {
     // Checked inside `run`: an unlock prompt can resolve after the download was cancelled.
     getManifest: (ids, signal) => run(() => {
       signal.throwIfAborted();
-      return getArchiveManifest(ids);
+      return getArchiveManifest(ids, signal);
     }),
     getDownloadUrl: async (id, signal) => {
       const result = await run(() => {
         signal.throwIfAborted();
-        return getDownloadUrl(id);
+        return getDownloadUrl(id, signal);
       });
       return result.url;
     },
@@ -74,9 +74,11 @@ export function useArchiveDownloader(source: ArchiveSource): ArchiveDownloadHook
     }
     window.addEventListener("beforeunload", leave);
     window.addEventListener("pagehide", hide);
+    window.addEventListener("drive-access-changed", hide);
     return () => {
       window.removeEventListener("beforeunload", leave);
       window.removeEventListener("pagehide", hide);
+      window.removeEventListener("drive-access-changed", hide);
       stop();
     };
   }, []);

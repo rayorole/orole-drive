@@ -100,6 +100,7 @@ export function DriveUndoProvider({ children }: { children: ReactNode }) {
       toast.error(error instanceof Error ? error.message : "Couldn’t undo that.", { id: toastId });
     } finally {
       void client.invalidateQueries({ queryKey: ["drive"] });
+      void client.invalidateQueries({ queryKey: ["storage-usage"] });
     }
   }, [client, undoChange]);
 

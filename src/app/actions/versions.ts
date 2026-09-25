@@ -12,7 +12,7 @@ import { idSchema } from "@/lib/drive-input";
 import { DriveError } from "@/lib/drive-errors";
 import { driveFileVersions, driveItems } from "@/lib/drive-schema";
 import { afterContentChange, replaceFileContent } from "@/lib/file-versions";
-import { removeVersionObject, signVersionDownload } from "@/lib/storage";
+import { cleanupVersion, queueVersionCleanup, signVersionDownload } from "@/lib/storage";
 import { itemData, uploadDestination } from "@/lib/uploads";
 
 const versionIdSchema = z.uuid("Choose a valid version.");
@@ -83,11 +83,12 @@ export async function deleteVersion(versionId: string): Promise<ActionResult<voi
     versionId = versionIdSchema.parse(versionId);
     const version = await withDriveTransaction("write", async (tx) => {
       const { version, file } = await availableVersion(tx, ctx, versionId, "write");
+      await queueVersionCleanup(tx, version);
       await tx.delete(driveFileVersions).where(eq(driveFileVersions.id, version.id));
       await recordEvents(tx, ctx, [{ action: "delete_version", item: { id: file.id, name: file.name, kind: "file", parentId: file.parentId }, details: { versionId: version.id, size: version.size } }]);
       return version;
     });
-    // The row is gone, so nothing refers to these bytes; a failed removal only costs storage.
-    await removeVersionObject(version).catch(() => undefined);
+    // A thumbnail worker may still hold this immutable content; cleanup retries from the journal.
+    await cleanupVersion(version).catch(() => undefined);
   }, "trash");
 }

@@ -1,5 +1,16 @@
 import type { UploadTicket } from "@/lib/drive-types";
 
+/** Queued reservations must renew their existing ticket before its signed URLs expire. */
+export function uploadTicketNeedsRefresh(ticket: UploadTicket, now = Date.now()): boolean {
+  const url = ticket.mode === "single" ? ticket.url : ticket.parts[0]?.url;
+  if (!url) return false; // A fully transferred multipart upload only needs completion.
+  const params = new URL(url).searchParams;
+  const date = params.get("X-Amz-Date") ?? "";
+  const signedAt = Date.parse(date.replace(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/, "$1-$2-$3T$4:$5:$6Z"));
+  const expiresAt = signedAt + Number(params.get("X-Amz-Expires")) * 1_000;
+  return !Number.isFinite(expiresAt) || expiresAt - now <= 60_000;
+}
+
 const MAX_ACTIVE_PUTS = 4;
 type SlotWaiter = { signal: AbortSignal; grant: () => void; cancel: () => void };
 let activePuts = 0;

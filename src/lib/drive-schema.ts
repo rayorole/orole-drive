@@ -98,6 +98,29 @@ export const driveItems = pgTable(
 
 export type DriveRow = typeof driveItems.$inferSelect;
 
+/** Durable upload identity and cleanup intent, deliberately surviving pending-item cascades. */
+export const driveUploadWork = pgTable("drive_upload_work", {
+  id: uuid("id").primaryKey(),
+  itemId: uuid("item_id").notNull(),
+  objectKey: varchar("object_key", { length: 128 }).notNull().unique(),
+  /** Single-PUT publication never writes the legacy final/staging identity. */
+  publicationKey: varchar("publication_key", { length: 128 }).unique(),
+  multipartUploadId: text("multipart_upload_id"),
+  multipart: boolean("multipart").notNull().default(false),
+  size: bigint("size", { mode: "number" }).notNull(),
+  mimeType: varchar("mime_type", { length: 127 }).notNull(),
+  status: text("status", { enum: ["pending", "cancelled", "published"] }).notNull().default("pending"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  /** Last signed ticket expiry; cancelled tombstones outlive every outstanding bearer URL. */
+  retainUntil: timestamp("retain_until", { withTimezone: true }).notNull(),
+}, (table) => [
+  index("drive_upload_work_status_idx").on(table.status, table.retainUntil),
+  check("drive_upload_work_status_valid", sql`${table.status} in ('pending', 'cancelled', 'published')`),
+  check("drive_upload_work_publication_distinct", sql`${table.publicationKey} is null or ${table.publicationKey} <> ${table.objectKey}`),
+]);
+
+export type UploadWorkRow = typeof driveUploadWork.$inferSelect;
+
 export const driveItemMembers = pgTable("drive_item_members", {
   itemId: uuid("item_id").notNull().references(() => driveItems.id, { onDelete: "cascade" }),
   userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),

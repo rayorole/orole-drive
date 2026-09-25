@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { emptyTrash, getTrashSummary } from "@/app/actions/drive";
+import { emptyTrash } from "@/app/actions/drive";
+import { getTrashSummary } from "@/lib/drive-read-client";
 import { formatBytes } from "@/lib/format-bytes";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -19,7 +20,7 @@ export function EmptyTrashDialog({ onClose }: { onClose: () => void }) {
   const { run } = useFolderAccess();
   const client = useQueryClient();
   const [confirmation, setConfirmation] = useState("");
-  const summary = useQuery({ queryKey: ["drive-trash-summary"], queryFn: () => run(() => getTrashSummary()), staleTime: 0, gcTime: 0 });
+  const summary = useQuery({ queryKey: ["drive-trash-summary"], queryFn: ({ signal }) => run(() => getTrashSummary(signal)), staleTime: 0, gcTime: 0 });
   const mutation = useMutation({
     mutationFn: () => run(() => emptyTrash()),
     onSuccess: ({ deleted, pending, skippedLocked }) => {
@@ -29,7 +30,10 @@ export function EmptyTrashDialog({ onClose }: { onClose: () => void }) {
       onClose();
     },
     // Listings, storage totals and the activity history all change.
-    onSettled: () => { void client.invalidateQueries({ predicate: (query) => typeof query.queryKey[0] === "string" && query.queryKey[0].startsWith("drive") }); },
+    onSettled: () => {
+      void client.invalidateQueries({ predicate: (query) => typeof query.queryKey[0] === "string" && query.queryKey[0].startsWith("drive") });
+      void client.invalidateQueries({ queryKey: ["storage-usage"] });
+    },
   });
   const data = summary.data;
   const ready = Boolean(data?.count) && confirmation === "DELETE" && !mutation.isPending;

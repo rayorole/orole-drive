@@ -46,12 +46,12 @@ import { toast } from "sonner";
 import { logout } from "@/app/actions/auth";
 import {
   copyItems,
-  listDrive,
   moveItems,
   restoreItems,
 } from "@/app/actions/drive";
 import { lockFolder } from "@/app/actions/folder-security";
 import { recordOpened, setFavorites } from "@/app/actions/drive-metadata";
+import { listDrive, currentDriveAccessGeneration, assertDriveAccessGeneration, cancelDriveReads } from "@/lib/drive-read-client";
 import type {
   DriveFilter,
   DriveItem,
@@ -59,7 +59,7 @@ import type {
   DriveSort,
   DriveTypeFilter,
 } from "@/lib/drive-types";
-import { optimisticDriveChange } from "@/lib/drive-cache";
+import { invalidateDriveMetadata, optimisticDriveChange } from "@/lib/drive-cache";
 import {
   canEditItem,
   canManageItem,
@@ -521,6 +521,12 @@ function DriveSidebar({
 }
 
 export function DriveWorkspace({ user }: { user: FamilyUser }) {
+  const client = useQueryClient();
+  useEffect(() => () => {
+    // The root provider survives login navigation; private results must not survive this session's workspace.
+    cancelDriveReads();
+    client.clear();
+  }, [client]);
   return (
     <FolderAccessProvider>
       <PinnedFoldersProvider>
@@ -648,8 +654,8 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
     setSelection({ scope, ids: new Set() });
   const listing = useQuery({
     queryKey,
-    queryFn: async () => {
-      const result = await listDrive(input);
+    queryFn: async ({ signal }) => {
+      const result = await listDrive(input, signal);
       if (!result.success)
         throw new DriveAccessError(result.error, result.lockedFolder);
       return result.data;
@@ -664,7 +670,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
         : undefined;
     },
     retry: false,
-    enabled: !activity,
+    enabled: !activity && deferredSearch === search.trim() && deferredFilterValues === filterValues,
     staleTime: 15_000,
   });
   const data = activity ? undefined : listing.data;
@@ -745,6 +751,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
     },
     onSettled: () => {
       void client.invalidateQueries({ queryKey: ["drive"] });
+      void client.invalidateQueries({ queryKey: ["storage-usage"] });
     },
   });
   const [clipboard, setClipboard] = useState<{
@@ -777,6 +784,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
     },
     onSettled: () => {
       void client.invalidateQueries({ queryKey: ["drive"] });
+      void client.invalidateQueries({ queryKey: ["storage-usage"] });
     },
   });
   const moveDrop = useMutation({
@@ -816,6 +824,7 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
     },
     onSettled: () => {
       void client.invalidateQueries({ queryKey: ["drive"] });
+      void client.invalidateQueries({ queryKey: ["storage-usage"] });
     },
   });
   const [marquee, setMarquee] = useState<{
@@ -885,8 +894,8 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
             : "Removed from favorites"
           : `${ids.length} items ${favorited ? "added to" : "removed from"} favorites`,
       ),
-    onSettled: () => {
-      void client.invalidateQueries({ queryKey: ["drive"] });
+    onSettled: (_result, _error, { ids }) => {
+      invalidateDriveMetadata(client, ids);
     },
   });
   const stale =
@@ -948,6 +957,18 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
       `${pathname}${next.size ? `?${next}` : ""}`,
     );
   }
+  function folderInput(id: string, fromTrash: boolean): DriveListInput {
+    const nextFilter = fromTrash ? "trash" : "all";
+    // Match navigate's sort reset, and the subsequent useQuery key, exactly.
+    return {
+      folderId: id,
+      filter: nextFilter,
+      search: "",
+      type: "all",
+      sort: nextFilter !== filter ? "name" : sort === "activity" ? undefined : sort,
+      direction: nextFilter !== filter ? "asc" : direction,
+    };
+  }
   async function openItem(item: DriveItem, fromTrash = trash) {
     if (actionsDisabled) return;
     if (item.kind === "file") {
@@ -957,18 +978,30 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
       }
       return;
     }
-    const nextInput: DriveListInput = {
-      folderId: item.id,
-      filter: fromTrash ? "trash" : "all",
-      search: "",
-      type: "all",
-      sort: sort === "activity" ? undefined : sort,
-      direction,
-    };
+    const nextInput = folderInput(item.id, fromTrash);
+    const generation = currentDriveAccessGeneration();
     setOpening(true);
     try {
-      const result = await run(() => listDrive(nextInput));
-      client.setQueryData(["drive", nextInput], result);
+      await run(async () => {
+        try {
+          const data = await client.fetchQuery({
+            queryKey: ["drive", nextInput],
+            queryFn: async ({ signal }) => {
+              const result = await listDrive(nextInput, signal);
+              if (!result.success) throw new DriveAccessError(result.error, result.lockedFolder);
+              return result.data;
+            },
+            staleTime: 15_000,
+            retry: false,
+          });
+          return { success: true, data };
+        } catch (error) {
+          // An in-flight hover prefetch can discover a locked ancestor. Prompt only on open.
+          if (error instanceof DriveAccessError) return { success: false, error: error.message, lockedFolder: error.lockedFolder };
+          throw error;
+        }
+      });
+      assertDriveAccessGeneration(generation);
       navigate(fromTrash ? "trash" : "all", item.id);
       if (!fromTrash) void recordOpened(item.id);
     } catch (error) {
@@ -986,18 +1019,11 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
   function prefetchFolder(item: DriveItem) {
     if (item.kind !== "folder" || item.isLocked || trash || actionsDisabled)
       return;
-    const nextInput: DriveListInput = {
-      folderId: item.id,
-      filter: "all",
-      search: "",
-      type: "all",
-      sort: sort === "activity" ? undefined : sort,
-      direction,
-    };
+    const nextInput = folderInput(item.id, false);
     void client.prefetchQuery({
       queryKey: ["drive", nextInput],
-      queryFn: async () => {
-        const result = await listDrive(nextInput);
+      queryFn: async ({ signal }) => {
+        const result = await listDrive(nextInput, signal);
         if (!result.success)
           throw new DriveAccessError(result.error, result.lockedFolder);
         return result.data;
@@ -1064,7 +1090,10 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
   async function unlockCurrent() {
     setOpening(true);
     try {
-      client.setQueryData(queryKey, await run(() => listDrive(input)));
+      const generation = currentDriveAccessGeneration();
+      const data = await run(() => listDrive(input));
+      assertDriveAccessGeneration(generation);
+      client.setQueryData(queryKey, data);
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not unlock folder.",
@@ -1075,15 +1104,23 @@ function DriveWorkspaceContent({ user }: { user: FamilyUser }) {
   }
 
   useEffect(() => {
-    function accessChanged() {
-      setDialog(null);
+    function accessChanged(event: Event) {
+      const keepSharingId = (event as CustomEvent<{ keepSharingId?: string }>).detail?.keepSharingId;
+      setDialog((current) => current?.kind === "share" && current.item.id === keepSharingId ? current : null);
       setSelection({ scope: "", ids: new Set() });
-      client.removeQueries({
-        predicate: (query) =>
-          typeof query.queryKey[0] === "string" &&
-          query.queryKey[0].startsWith("drive-"),
+      setClipboard(null);
+      // Reset observed queries as well as cached prefetched data; do not retain revoked names or URLs.
+      void client.resetQueries({
+        predicate: (query) => {
+          const key = query.queryKey[0];
+          if (key === "drive-sharing" && query.queryKey[1] === keepSharingId) return false;
+          return typeof key === "string" && (
+            key === "drive" || key.startsWith("drive-") || key === "command-recent" ||
+            key === "storage-usage" || key === "private-file-scan" ||
+            key === "text-preview" || key === "text-highlight"
+          );
+        },
       });
-      void client.resetQueries({ queryKey: ["drive"] });
     }
     window.addEventListener("drive-access-changed", accessChanged);
     return () =>

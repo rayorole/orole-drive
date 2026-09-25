@@ -4,8 +4,8 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { Download, RotateCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { getDownloadUrl } from "@/app/actions/drive";
-import { deleteVersion, getVersionDownloadUrl, listVersions, restoreVersion } from "@/app/actions/versions";
+import { getDownloadUrl, getVersionDownloadUrl, listVersions } from "@/lib/drive-read-client";
+import { deleteVersion, restoreVersion } from "@/app/actions/versions";
 import type { DriveFileVersion, DriveItem } from "@/lib/drive-types";
 import { formatBytes } from "@/lib/format-bytes";
 import { canEditItem } from "@/lib/drive-permissions";
@@ -24,6 +24,7 @@ import { useFolderAccess } from "@/components/folder-access";
 /** Everything cached about a file's content after it changes: listings, thumbnail, versions and scan state. */
 export function refreshFileContent(client: QueryClient, id: string) {
   void client.invalidateQueries({ queryKey: ["drive"] });
+  void client.invalidateQueries({ queryKey: ["storage-usage"] });
   for (const key of ["drive-thumbnail", "drive-versions", "private-file-scan"]) void client.invalidateQueries({ queryKey: [key, id] });
 }
 
@@ -35,7 +36,7 @@ export function DriveVersionsDialog({ item, onClose }: { item: DriveItem; onClos
   const [deleting, setDeleting] = useState<DriveFileVersion | null>(null);
   const versions = useQuery({
     queryKey: ["drive-versions", item.id],
-    queryFn: () => run(() => listVersions(item.id)),
+    queryFn: ({ signal }) => run(() => listVersions(item.id, signal)),
   });
   const download = useMutation({
     mutationFn: (version: DriveFileVersion) => run(() => version.current ? getDownloadUrl(item.id) : getVersionDownloadUrl(version.id)),
@@ -60,7 +61,7 @@ export function DriveVersionsDialog({ item, onClose }: { item: DriveItem; onClos
     onSettled: () => {
       void client.invalidateQueries({ queryKey: ["drive-versions", item.id] });
       // Storage usage counts kept versions.
-      void client.invalidateQueries({ queryKey: ["drive"] });
+      void client.invalidateQueries({ queryKey: ["storage-usage"] });
     },
   });
   const busy = restore.isPending || remove.isPending;

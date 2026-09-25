@@ -2,8 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { getThumbnailUrl } from "@/app/actions/thumbnails";
+import { useQuery } from "@tanstack/react-query";
+import { getThumbnailUrl } from "@/lib/drive-read-client";
 import { canThumbnail, getPreviewKind } from "@/lib/file-preview";
 import type { DriveItem } from "@/lib/drive-types";
 import { Hint } from "@/components/hint";
@@ -13,7 +13,6 @@ export function DriveThumbnail({ item, fallback }: { item: DriveItem; fallback: 
   const [visible, setVisible] = useState(false);
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const eligible = !item.trashedAt && canThumbnail(item);
-  const queryClient = useQueryClient();
   useEffect(() => {
     if (!eligible || !container.current) return;
     const observer = new IntersectionObserver((entries) => {
@@ -25,16 +24,11 @@ export function DriveThumbnail({ item, fallback }: { item: DriveItem; fallback: 
     observer.observe(container.current);
     return () => observer.disconnect();
   }, [eligible]);
-  useEffect(() => {
-    const clearAccess = () => { void queryClient.resetQueries({ queryKey: ["drive-thumbnail", item.id], exact: true }); };
-    window.addEventListener("drive-access-changed", clearAccess);
-    return () => window.removeEventListener("drive-access-changed", clearAccess);
-  }, [item.id, queryClient]);
   const thumbnail = useQuery({
     queryKey: ["drive-thumbnail", item.id],
     queryFn: async ({ signal }) => {
       // Passive grid loading never opens a password prompt; opening the file is the unlock action.
-      const result = await getThumbnailUrl(item.id);
+      const result = await getThumbnailUrl(item.id, signal);
       signal.throwIfAborted();
       if (!result.success) throw new Error(result.error);
       return result.data.url;

@@ -2,22 +2,24 @@ import "server-only";
 
 import type { DriveContext, DriveTransaction } from "@/lib/drive-access";
 import type { DriveRow } from "@/lib/drive-schema";
-import type { DriveItem, UploadResolution, UploadTicket } from "@/lib/drive-types";
+import type { DriveItem, DriveNameConflict, UploadResolution, UploadTicket } from "@/lib/drive-types";
 import { randomUUID } from "node:crypto";
 import { after } from "next/server";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { recordEvents } from "@/lib/activity";
 import { numberedName } from "@/lib/copy-name";
 import { assertCapability, assertItemAccess, assertItemsAccess, getItemAccess, visibleItemsCondition, withDriveTransaction } from "@/lib/drive-access";
 import { DriveError, NameConflictError } from "@/lib/drive-errors";
-import { driveActivity, driveItems } from "@/lib/drive-schema";
+import { driveActivity, driveItems, driveUploadWork } from "@/lib/drive-schema";
 import { folderPath, MAX_FOLDER_DEPTH } from "@/lib/drive-tree";
 import { MULTIPART_THRESHOLD_BYTES } from "@/lib/drive-types";
 import { prioritizeScans } from "@/lib/file-risk";
 import { afterContentChange, replaceFileContent, type ContentReplacement } from "@/lib/file-versions";
 import { destinationSiblings, findConflicts, type DestinationSibling } from "@/lib/name-conflicts";
 import { assertQuota } from "@/lib/quota";
-import { abortMultipartUpload, commitUpload, createMultipartUpload, createObjectKey, removeObject, removeStagedObject, signUpload, toDriveItem } from "@/lib/storage";
+import { cleanupUpload, commitUpload, createMultipartUpload, createObjectKey, ensureUploadWork, listUploadedParts, referencedObjectKeys, removeStagedObject, signUpload, toDriveItem } from "@/lib/storage";
+import { getDb } from "@/lib/db";
+import { withStorageObjectLock } from "@/lib/storage-work";
 import { cancelTrashedUploads, trashRows } from "@/lib/trash";
 
 export async function itemData(tx: DriveTransaction, ctx: DriveContext, row: DriveRow): Promise<DriveItem> {
@@ -74,114 +76,229 @@ async function placeIncoming(tx: DriveTransaction, ctx: DriveContext, incoming: 
 
 export type UploadRequest = { key: string; name: string; size: number; mimeType: string; parentId: string | null; resolution?: UploadResolution };
 
-/** Reserves a pending upload (access, name clash and quota checks) and signs where its bytes go. */
+/** Authorizes the live pending row and its replacement target, never a stale storage snapshot. */
+async function pendingUpload(tx: DriveTransaction, ctx: DriveContext, id: string, ownOnly = false): Promise<DriveRow> {
+  const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id));
+  if (row) await ensureUploadWork(tx, row);
+  const [work] = await tx.select().from(driveUploadWork).where(eq(driveUploadWork.id, id));
+  if (!row || row.kind !== "file" || row.state !== "pending" || row.trashedAt || row.deletionStartedAt ||
+      !work || work.status !== "pending" || work.objectKey !== row.objectKey ||
+      (ownOnly && row.createdBy !== ctx.userId) || row.createdAt.getTime() <= Date.now() - 86_400_000) {
+    throw new DriveError("This upload is no longer available. Upload the file again.");
+  }
+  await assertUploadAccess(tx, ctx, row);
+  if (row.replacesId) {
+    const [file] = await tx.select().from(driveItems).where(eq(driveItems.id, row.replacesId));
+    if (!file || file.state !== "complete" || file.trashedAt || file.deletionStartedAt) throw new DriveError("The file this upload was replacing is no longer available.");
+    await assertUploadAccess(tx, ctx, file);
+  }
+  return row;
+}
+
+/** Storage discovery/initiation happens under an object claim, not the hierarchy lock. */
+export async function uploadTicket(ctx: DriveContext, id: string, resume = false): Promise<UploadTicket> {
+  const snapshot = await withDriveTransaction("read", (tx) => pendingUpload(tx, ctx, id, resume));
+  return withStorageObjectLock(snapshot.objectKey!, async (confirmClaim) => {
+    let row = await withDriveTransaction("read", (tx) => pendingUpload(tx, ctx, id, resume));
+    const [work] = await getDb().select().from(driveUploadWork).where(eq(driveUploadWork.id, id));
+    let multipartUploadId = work.multipartUploadId;
+    // Multipart intent is durable before initiation, including response-loss recovery.
+    if (!multipartUploadId && work.multipart) {
+      multipartUploadId = await createMultipartUpload(row);
+      await confirmClaim();
+      await getDb().update(driveUploadWork).set({ multipartUploadId }).where(eq(driveUploadWork.id, id));
+    }
+    row = { ...row, multipartUploadId };
+    const completedParts = resume ? await listUploadedParts(row) : [];
+    await confirmClaim();
+    return withDriveTransaction("write", async (tx) => {
+      const current = await pendingUpload(tx, ctx, id, resume);
+      if (current.objectKey !== row.objectKey) throw new DriveError("This upload is no longer available.");
+      await tx.update(driveItems).set({ multipartUploadId }).where(eq(driveItems.id, id));
+      await tx.update(driveUploadWork).set({ retainUntil: sql`now() + interval '25 hours'` }).where(eq(driveUploadWork.id, id));
+      return signUpload({ ...current, multipartUploadId }, completedParts);
+    });
+  });
+}
+
+/** Reservation itself returns NameConflictError; there is no separate file-name preflight. */
 export async function startUpload(ctx: DriveContext, request: UploadRequest): Promise<UploadTicket> {
-  let multipartRow: DriveRow | undefined;
-  const { ticket, trashedUploadIds } = await withDriveTransaction("write", async (tx) => {
+  const { id, ticket, trashedUploadIds } = await withDriveTransaction("write", async (tx) => {
     await uploadDestination(tx, ctx, request.parentId);
     const siblings = await destinationSiblings(tx, ctx, request.parentId);
     const placement = await placeIncoming(tx, ctx, { key: request.key, name: request.name, kind: "file" }, request.parentId, siblings, request.resolution);
     await assertQuota(tx, ctx, request.size);
     const id = randomUUID();
+    const now = new Date();
+    const key = createObjectKey(placement.replacesId ?? id);
     const [row] = await tx.insert(driveItems).values({
       id, name: placement.name, size: request.size, mimeType: request.mimeType, parentId: request.parentId, kind: "file", state: "pending",
-      // A replacement stores its bytes under the file it becomes a version of, so completion only swaps keys.
-      objectKey: createObjectKey(placement.replacesId ?? id), replacesId: placement.replacesId, createdBy: ctx.userId,
+      objectKey: key, replacesId: placement.replacesId, createdBy: ctx.userId, createdAt: now,
       ownerId: ctx.userId, accessMode: request.parentId ? "inherit" : "private",
     }).returning();
-    if (request.size < MULTIPART_THRESHOLD_BYTES) return { ticket: await signUpload(row), trashedUploadIds: placement.trashedUploadIds };
-    const multipartUploadId = await createMultipartUpload(row);
-    multipartRow = { ...row, multipartUploadId };
-    await tx.update(driveItems).set({ multipartUploadId }).where(eq(driveItems.id, id));
-    return { ticket: await signUpload(multipartRow), trashedUploadIds: placement.trashedUploadIds };
-  }).catch(async (error: unknown) => {
-    if (multipartRow) await abortMultipartUpload(multipartRow).catch(() => undefined);
-    throw error;
+    await tx.insert(driveUploadWork).values({
+      id, itemId: placement.replacesId ?? id, objectKey: key, size: request.size, mimeType: request.mimeType,
+      createdAt: now, retainUntil: new Date(now.getTime() + 25 * 60 * 60 * 1000),
+      multipart: request.size >= MULTIPART_THRESHOLD_BYTES,
+    });
+    // Presigning uses configured local credentials, not R2 I/O. Ordinary files
+    // retain the one-transaction reservation fast path.
+    const ticket = request.size < MULTIPART_THRESHOLD_BYTES ? await signUpload(row) : null;
+    return { id, ticket, trashedUploadIds: placement.trashedUploadIds };
   });
   await cancelTrashedUploads(trashedUploadIds);
-  return ticket;
-}
-
-type Completion = { staged: DriveRow; item: DriveItem; replaced: ContentReplacement | null };
-
-async function completeReplacement(tx: DriveTransaction, ctx: DriveContext, row: DriveRow, fileId: string): Promise<Completion | null> {
-  const [file] = await tx.select().from(driveItems).where(eq(driveItems.id, fileId)).for("update");
-  if (!file || file.state !== "complete" || file.trashedAt || file.deletionStartedAt) {
-    // Nothing left to become a version of: drop the upload so it stops holding storage.
-    await removeObject(row);
-    await tx.delete(driveItems).where(eq(driveItems.id, row.id));
-    return null;
+  if (ticket) return ticket;
+  try {
+    return await uploadTicket(ctx, id);
+  } catch (error) {
+    // No ticket reached the caller: retire the reservation durably, including a
+    // multipart initiation whose response was lost. A retry starts cleanly.
+    await withDriveTransaction("write", async (tx) => {
+      await tx.update(driveUploadWork).set({ status: "cancelled" }).where(and(eq(driveUploadWork.id, id), eq(driveUploadWork.status, "pending")));
+      await tx.update(driveItems).set({ deletionStartedAt: new Date() }).where(and(eq(driveItems.id, id), eq(driveItems.state, "pending")));
+    });
+    await cleanupUpload(id).catch(() => undefined);
+    throw error;
   }
-  await assertUploadAccess(tx, ctx, file);
-  const etag = await commitUpload(row);
-  // Frees the object key the file takes over.
-  await tx.delete(driveItems).where(eq(driveItems.id, row.id));
-  const replaced = await replaceFileContent(tx, file, { objectKey: row.objectKey!, size: row.size, mimeType: row.mimeType!, etag, createdBy: row.createdBy });
-  await tx.insert(driveActivity).values({ userId: ctx.userId, itemId: file.id, accessedAt: new Date() })
-    .onConflictDoUpdate({ target: [driveActivity.userId, driveActivity.itemId], set: { accessedAt: new Date() } });
-  await recordEvents(tx, ctx, [{ action: "new_version", item: { id: file.id, name: file.name, kind: "file", parentId: file.parentId }, details: { versionId: replaced.version.id, size: row.size } }]);
-  return { staged: row, item: await itemData(tx, ctx, replaced.file), replaced };
 }
 
-/** Publishes an upload's bytes: a new file becomes available, a replacement becomes its file's current version. */
+type Completion = { staged: DriveRow | null; item: DriveItem; replaced: ContentReplacement | null };
+
+/** Claim -> authorized snapshot -> R2 -> fresh authorization + atomic publication. */
 export async function finishUpload(ctx: DriveContext, id: string): Promise<DriveItem> {
-  const result = await withDriveTransaction("write", async (tx): Promise<Completion | null> => {
-    const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id)).for("update");
-    if (!row || row.kind !== "file") throw new DriveError("This upload is no longer available.");
-    await assertUploadAccess(tx, ctx, row);
-    if (row.state === "complete") return { staged: row, item: await itemData(tx, ctx, row), replaced: null };
-    if (row.replacesId) return completeReplacement(tx, ctx, row, row.replacesId);
-    const etag = await commitUpload(row);
-    const [completed] = await tx.update(driveItems).set({ state: "complete", etag, updatedAt: new Date() }).where(eq(driveItems.id, id)).returning();
-    await tx.insert(driveActivity).values({ userId: ctx.userId, itemId: id, accessedAt: new Date() })
-      .onConflictDoUpdate({ target: [driveActivity.userId, driveActivity.itemId], set: { accessedAt: new Date() } });
-    await recordEvents(tx, ctx, [{ action: "upload", item: { id, name: completed.name, kind: "file", parentId: completed.parentId }, details: { size: completed.size } }]);
-    return { staged: row, item: await itemData(tx, ctx, completed), replaced: null };
+  const identity = await withDriveTransaction("write", async (tx) => {
+    const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id));
+    if (row) await ensureUploadWork(tx, row);
+    const [work] = await tx.select().from(driveUploadWork).where(eq(driveUploadWork.id, id));
+    if (work?.status === "pending") {
+      const referenced = await referencedObjectKeys(tx, [work.objectKey, ...(work.publicationKey ? [work.publicationKey] : [])]);
+      if (referenced.size) await tx.update(driveUploadWork).set({ status: "published" }).where(eq(driveUploadWork.id, id));
+    }
+    return work;
   });
-  if (!result) throw new DriveError("The file this upload was replacing is in Trash or was deleted, so the upload was cancelled. Upload it again to add it as a new file.");
-  // Never remove staging before the database commit: a rolled-back single PUT
-  // completion must still be retryable with the original verified source.
-  await removeStagedObject(result.staged).catch(() => undefined);
+  if (!identity) {
+    return withDriveTransaction("read", async (tx) => {
+      const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id));
+      if (!row || row.state !== "complete") throw new DriveError("This upload is no longer available.");
+      await assertUploadAccess(tx, ctx, row);
+      return itemData(tx, ctx, row);
+    });
+  }
+  const result = await withStorageObjectLock(identity.objectKey, async (confirmClaim): Promise<Completion> => {
+    const snapshot = await withDriveTransaction("write", async (tx) => {
+      const [work] = await tx.select().from(driveUploadWork).where(eq(driveUploadWork.id, id));
+      if (work?.status === "published") {
+        const [file] = await tx.select().from(driveItems).where(eq(driveItems.id, work.itemId));
+        if (!file || file.state !== "complete") throw new DriveError("This file is no longer available.");
+        await assertUploadAccess(tx, ctx, file);
+        return { item: await itemData(tx, ctx, file) };
+      }
+      const row = await pendingUpload(tx, ctx, id);
+      // A different deployment may still write the original final key. Our
+      // single-PUT candidate must be durable and disjoint before entering R2.
+      const publicationKey = row.multipartUploadId ? row.objectKey! : work.publicationKey ?? createObjectKey(row.replacesId ?? row.id);
+      if (!row.multipartUploadId && !work.publicationKey) await tx.update(driveUploadWork).set({ publicationKey }).where(eq(driveUploadWork.id, id));
+      return { row, publicationKey };
+    });
+    if ("item" in snapshot) return { staged: null, item: snapshot.item!, replaced: null };
+    const row = snapshot.row!;
+    const publicationKey = snapshot.publicationKey!;
+    const etag = await commitUpload(row, publicationKey);
+    await confirmClaim();
+    const published = await withDriveTransaction("write", async (tx): Promise<Completion> => {
+      const current = await pendingUpload(tx, ctx, id);
+      if (current.objectKey !== row.objectKey || current.multipartUploadId !== row.multipartUploadId) throw new DriveError("This upload has changed. Please try again.");
+      let completed: DriveRow;
+      let replaced: ContentReplacement | null = null;
+      if (current.replacesId) {
+        const [file] = await tx.select().from(driveItems).where(eq(driveItems.id, current.replacesId));
+        await tx.delete(driveItems).where(eq(driveItems.id, id));
+        replaced = await replaceFileContent(tx, file, { objectKey: publicationKey, size: row.size, mimeType: row.mimeType!, etag, createdBy: row.createdBy });
+        completed = replaced.file;
+      } else {
+        [completed] = await tx.update(driveItems).set({ objectKey: publicationKey, state: "complete", etag, updatedAt: new Date() }).where(eq(driveItems.id, id)).returning();
+      }
+      await tx.update(driveUploadWork).set({ status: "published" }).where(eq(driveUploadWork.id, id));
+      await tx.insert(driveActivity).values({ userId: ctx.userId, itemId: completed.id, accessedAt: new Date() })
+        .onConflictDoUpdate({ target: [driveActivity.userId, driveActivity.itemId], set: { accessedAt: new Date() } });
+      await recordEvents(tx, ctx, [{ action: replaced ? "new_version" : "upload", item: { id: completed.id, name: completed.name, kind: "file", parentId: completed.parentId },
+        details: replaced ? { versionId: replaced.version.id, size: row.size } : { size: row.size } }]);
+      return { staged: row, item: await itemData(tx, ctx, completed), replaced };
+    });
+    // Staging remains retryable through a failed publication, and disappears only after commit.
+    await removeStagedObject(row).catch(() => undefined);
+    return published;
+  });
   if (result.replaced) await afterContentChange(result.item, result.replaced.pruned);
-  // Score the new file and, if it looks risky, look it up on VirusTotal ahead of everything else.
-  else if (!result.item.isProtected) after(() => prioritizeScans([result.item.id]));
+  else if (result.staged && !result.item.isProtected) after(() => prioritizeScans([result.item.id]));
   return result.item;
 }
 
 export async function cancelPendingUpload(ctx: DriveContext, id: string): Promise<void> {
   await withDriveTransaction("write", async (tx) => {
-    const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id)).for("update");
+    const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id));
     if (!row) return;
     if (row.kind !== "file" || row.state !== "pending") throw new DriveError("This upload has already completed. Move the file to Trash instead.");
     await assertUploadAccess(tx, ctx, row, { allowTrashed: true });
-    await removeObject(row);
-    await tx.delete(driveItems).where(eq(driveItems.id, id));
+    await ensureUploadWork(tx, row);
+    await tx.update(driveUploadWork).set({ status: "cancelled" }).where(eq(driveUploadWork.id, id));
+    await tx.update(driveItems).set({ deletionStartedAt: new Date() }).where(eq(driveItems.id, id));
   });
+  // A concurrent completion observes the committed cancellation and cannot publish.
+  // Busy/error cleanup retains the journal for the scheduled retry.
+  await cleanupUpload(id).catch(() => undefined);
 }
 
-/**
- * The folder called `name` for a folder upload: an existing folder with that name (any case) is reused, so the upload
- * merges into it; otherwise a new folder is created, settling a clash with a file like any other upload.
- */
-export async function ensureUploadFolder(ctx: DriveContext, request: { key: string; name: string; parentId: string | null; resolution?: UploadResolution }): Promise<{ folder: DriveItem; created: boolean }> {
-  const { result, trashedUploadIds } = await withDriveTransaction("write", async (tx) => {
-    const path = await uploadDestination(tx, ctx, request.parentId);
-    const siblings = await destinationSiblings(tx, ctx, request.parentId);
-    const existing = siblings.get(request.name.toLowerCase());
-    if (existing?.kind === "folder") {
-      const [folder] = await tx.select().from(driveItems).where(eq(driveItems.id, existing.id));
-      await assertItemAccess(tx, ctx, folder, { permission: "write" });
-      return { result: { folder: await itemData(tx, ctx, folder), created: false }, trashedUploadIds: [] };
+export type UploadFolderRequest = { key: string; name: string; parentId: string | null; parentKey?: string; resolution?: UploadResolution };
+export type UploadFolderResult = { key: string; folder: DriveItem; created: boolean };
+
+/** One bounded transaction preserves dependency mapping, permissions, depth checks and per-folder events. */
+export async function ensureUploadFolders(ctx: DriveContext, requests: UploadFolderRequest[]): Promise<UploadFolderResult[]> {
+  const { results, trashedUploadIds } = await withDriveTransaction("write", async (tx) => {
+    const results: UploadFolderResult[] = [];
+    const resolved = new Map<string, string>();
+    const blocked = new Set<string>();
+    const conflicts: DriveNameConflict[] = [];
+    const trashedUploadIds: string[] = [];
+    for (const request of requests) {
+      if (request.parentKey && blocked.has(request.parentKey)) {
+        blocked.add(request.key);
+        continue;
+      }
+      const parentId = request.parentKey ? resolved.get(request.parentKey) : request.parentId;
+      if (parentId === undefined) throw new DriveError("Upload folders must follow their parent folders.");
+      const path = await uploadDestination(tx, ctx, parentId);
+      const siblings = await destinationSiblings(tx, ctx, parentId);
+      const existing = siblings.get(request.name.toLowerCase());
+      if (existing?.kind === "folder") {
+        const [folder] = await tx.select().from(driveItems).where(eq(driveItems.id, existing.id));
+        await assertItemAccess(tx, ctx, folder, { permission: "write" });
+        results.push({ key: request.key, folder: await itemData(tx, ctx, folder), created: false });
+        resolved.set(request.key, folder.id);
+        continue;
+      }
+      if (path.length >= MAX_FOLDER_DEPTH) throw new DriveError("Folders can be nested up to 64 levels deep.");
+      let placement: Placement;
+      try {
+        placement = await placeIncoming(tx, ctx, { key: request.key, name: request.name, kind: "folder" }, parentId, siblings, request.resolution);
+      } catch (error) {
+        if (!(error instanceof NameConflictError)) throw error;
+        conflicts.push(...error.conflicts);
+        blocked.add(request.key);
+        continue;
+      }
+      const [folder] = await tx.insert(driveItems).values({
+        id: randomUUID(), name: placement.name, parentId, kind: "folder", state: "complete", size: 0, createdBy: ctx.userId,
+        ownerId: ctx.userId, accessMode: parentId ? "inherit" : "private",
+      }).returning();
+      await recordEvents(tx, ctx, [{ action: "create_folder", item: { id: folder.id, name: folder.name, kind: "folder", parentId: folder.parentId } }]);
+      trashedUploadIds.push(...placement.trashedUploadIds);
+      results.push({ key: request.key, folder: await itemData(tx, ctx, folder), created: true });
+      resolved.set(request.key, folder.id);
     }
-    if (path.length >= MAX_FOLDER_DEPTH) throw new DriveError("Folders can be nested up to 64 levels deep.");
-    const placement = await placeIncoming(tx, ctx, { key: request.key, name: request.name, kind: "folder" }, request.parentId, siblings, request.resolution);
-    const [folder] = await tx.insert(driveItems).values({
-      id: randomUUID(), name: placement.name, parentId: request.parentId, kind: "folder", state: "complete", size: 0, createdBy: ctx.userId,
-      ownerId: ctx.userId, accessMode: request.parentId ? "inherit" : "private",
-    }).returning();
-    await recordEvents(tx, ctx, [{ action: "create_folder", item: { id: folder.id, name: folder.name, kind: "folder", parentId: folder.parentId } }]);
-    return { result: { folder: await itemData(tx, ctx, folder), created: true }, trashedUploadIds: placement.trashedUploadIds };
+    if (conflicts.length) throw new NameConflictError(conflicts);
+    return { results, trashedUploadIds };
   });
   await cancelTrashedUploads(trashedUploadIds);
-  return result;
+  return results;
 }

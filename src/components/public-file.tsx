@@ -4,7 +4,7 @@ import { useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Check, Code2, Copy, Download, File, FileImage, FileMusic, FileText, FileVideo, Link2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
-import { getPublicAccess, getPublicFolderFileAccess } from "@/app/actions/public";
+import { getPublicAccess, getPublicFolderFileAccess } from "@/lib/drive-read-client";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverDescription, PopoverHeader, PopoverTitle, PopoverTrigger } from "@/components/ui/popover";
 import { Spinner } from "@/components/spinner";

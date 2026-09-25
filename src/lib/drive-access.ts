@@ -38,6 +38,16 @@ export interface DriveActor {
 
 const driveActors = new AsyncLocalStorage<DriveActor>();
 
+interface SessionValidation {
+  userId: string;
+  email: string;
+  deadline: Promise<number>;
+}
+
+// Only withDriveTransaction installs a scope; a pooled connection or action is
+// never a cache key. No item ACLs or password grants are retained here.
+const transactionSessions = new WeakMap<Database | DriveTransaction, Map<string, SessionValidation>>();
+
 // Only trusted server code may call this after validating OAuth credentials.
 // Client headers never select an actor, and absent capabilities never fall back
 // to the browser's cookie identity.
@@ -100,22 +110,45 @@ export async function withDriveTransaction<T>(
     await tx.execute(mode === "read"
       ? sql`select pg_advisory_xact_lock_shared(1329876812, 1146242646)`
       : sql`select pg_advisory_xact_lock(1329876812, 1146242646)`);
-    const actor = driveActors.getStore();
-    if (actor) await assertSession(tx, actor.context);
-    return work(tx);
+    transactionSessions.set(tx, new Map());
+    try {
+      const actor = driveActors.getStore();
+      if (actor) await assertSession(tx, actor.context);
+      return await work(tx);
+    } finally {
+      transactionSessions.delete(tx);
+    }
   }, { isolationLevel: "read committed" });
 }
 
-async function assertSession(db: Database | DriveTransaction, ctx: DriveContext): Promise<void> {
-  const [active] = await db.select({ email: user.email, emailVerified: user.emailVerified })
-    .from(session).innerJoin(user, eq(user.id, session.userId)).where(and(
-      eq(session.id, ctx.sessionId),
-      eq(session.userId, ctx.userId),
-      eq(user.email, ctx.email),
-      gt(session.expiresAt, sql`clock_timestamp()`),
-    )).limit(1).for("key share");
-  // The row lock prevents session deletion from racing grant creation or signing.
+async function validateSession(db: Database | DriveTransaction, ctx: DriveContext): Promise<number> {
+  const startedAt = performance.now();
+  const [active] = await db.select({
+    email: user.email,
+    emailVerified: user.emailVerified,
+    remainingMs: sql<number>`extract(epoch from (${session.expiresAt} - clock_timestamp())) * 1000`.mapWith(Number),
+  }).from(session).innerJoin(user, eq(user.id, session.userId)).where(and(
+    eq(session.id, ctx.sessionId),
+    eq(session.userId, ctx.userId),
+    eq(user.email, ctx.email),
+    gt(session.expiresAt, sql`clock_timestamp()`),
+  )).limit(1).for("share");
+  // SHARE also prevents expiry/verification changes, not just deletion, while a
+  // transaction reuses this validation. Keep expiry checks live without relying
+  // on the application clock matching Postgres (query time is conservative).
   if (!active || !isVerifiedFamilyUser(active)) throw new FamilyAuthError();
+  return startedAt + active.remainingMs;
+}
+
+async function assertSession(db: Database | DriveTransaction, ctx: DriveContext): Promise<void> {
+  const scope = transactionSessions.get(db);
+  let validation = scope?.get(ctx.sessionId);
+  if (!validation || validation.userId !== ctx.userId || validation.email !== ctx.email) {
+    validation = { userId: ctx.userId, email: ctx.email, deadline: validateSession(db, ctx) };
+    scope?.set(ctx.sessionId, validation);
+  }
+  const deadline = await validation.deadline;
+  if (performance.now() >= deadline) throw new FamilyAuthError();
 }
 
 async function loadAccessNodes(
@@ -217,6 +250,44 @@ export async function getItemsAccess(
     }));
   }
   return flags;
+}
+
+/** One fresh ACL snapshot for a listing; never retained across another DB call or write. */
+export async function getListingAccess(
+  tx: DriveTransaction,
+  ctx: DriveContext,
+  rows: DriveRow[],
+  path: DriveRow[],
+  trash: boolean,
+): Promise<{
+  access: Map<string, DriveAccessFlags>;
+  breadcrumbs: { id: string; name: string; permission: DriveAccessFlags["permission"] }[];
+}> {
+  const nodes = await loadAccessNodes(tx, ctx, [...new Set([...rows, ...path].map((row) => row.id))]);
+  const current = path.at(-1);
+  if (current) {
+    evaluateItemAccess(nodes, current.id, ctx.userId, { allowTrashed: trash });
+    if (trash && (!current.trashedAt || current.deletionStartedAt)) throw new DriveError("This folder is not in Trash.");
+  }
+  const breadcrumbs: { id: string; name: string; permission: DriveAccessFlags["permission"] }[] = [];
+  for (const row of path) {
+    try {
+      const { permission } = evaluateItemAccess(nodes, row.id, ctx.userId, { allowTrashed: trash });
+      breadcrumbs.push({ id: row.id, name: row.name, permission });
+    } catch (error) {
+      if (!(error instanceof DriveError)) throw error;
+      // A directly shared descendant must not reveal inaccessible ancestors.
+      breadcrumbs.length = 0;
+    }
+  }
+  const access = new Map<string, DriveAccessFlags>();
+  for (const row of current ? [...rows, current] : rows) {
+    access.set(row.id, evaluateItemAccess(nodes, row.id, ctx.userId, {
+      allowTrashed: row.trashedAt !== null,
+      includeSelf: false,
+    }));
+  }
+  return { access, breadcrumbs };
 }
 
 /** Like `assertItemsAccess`, but per id and without throwing: null when the item is missing or out of reach for this session. */

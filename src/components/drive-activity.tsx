@@ -3,7 +3,7 @@
 import { useState, type ReactNode } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { History, TriangleAlert } from "lucide-react";
-import { listActivity, listActivityMembers } from "@/app/actions/activity";
+import { listActivity, listActivityMembers } from "@/lib/drive-read-client";
 import type {
   DriveActivityAction,
   DriveActivityEvent,
@@ -355,18 +355,18 @@ export function DriveActivityView({
   const actions = actionGroups.find((entry) => entry.value === group)?.actions;
   const members = useQuery({
     queryKey: ["drive-activity-members"],
-    queryFn: () => run(() => listActivityMembers()),
+    queryFn: ({ signal }) => run(() => listActivityMembers(signal)),
     staleTime: 5 * 60_000,
   });
   const feed = useInfiniteQuery({
     queryKey: ["drive-activity", actorId, group],
-    queryFn: ({ pageParam }) =>
+    queryFn: ({ pageParam, signal }) =>
       run(() =>
         listActivity({
           cursor: pageParam,
           actorId: actorId === "all" ? undefined : actorId,
           actions,
-        }),
+        }, signal),
       ),
     initialPageParam: null as string | null,
     getNextPageParam: (page) => page.nextCursor,
@@ -580,7 +580,7 @@ export function ItemActivity({ itemId }: { itemId: string }) {
   const { run } = useFolderAccess();
   const activity = useQuery({
     queryKey: ["drive-activity-item", itemId],
-    queryFn: () => run(() => listActivity({ itemId, limit: 10 })),
+    queryFn: ({ signal }) => run(() => listActivity({ itemId, limit: 10 }, signal)),
     staleTime: 15_000,
   });
   const [now] = useState(() => Date.now());

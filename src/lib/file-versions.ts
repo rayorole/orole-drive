@@ -9,7 +9,7 @@ import { desc, eq, inArray } from "drizzle-orm";
 import { DriveError } from "@/lib/drive-errors";
 import { driveFileVersions, driveItems } from "@/lib/drive-schema";
 import { prioritizeScans } from "@/lib/file-risk";
-import { removeThumbnail, removeVersionObject } from "@/lib/storage";
+import { cleanupVersion, queueVersionCleanup, removeThumbnail } from "@/lib/storage";
 import { driveFileRisks, driveVirusScans } from "@/lib/virustotal-schema";
 
 /** Earlier versions kept per file; a replacement beyond this drops the oldest. */
@@ -40,15 +40,18 @@ export async function replaceFileContent(tx: DriveTransaction, file: DriveRow, c
   await tx.delete(driveFileRisks).where(eq(driveFileRisks.itemId, file.id));
   const pruned = await tx.select().from(driveFileVersions).where(eq(driveFileVersions.itemId, file.id))
     .orderBy(desc(driveFileVersions.replacedAt), desc(driveFileVersions.createdAt)).offset(MAX_FILE_VERSIONS);
-  if (pruned.length) await tx.delete(driveFileVersions).where(inArray(driveFileVersions.id, pruned.map((row) => row.id)));
+  if (pruned.length) {
+    for (const version of pruned) await queueVersionCleanup(tx, version);
+    await tx.delete(driveFileVersions).where(inArray(driveFileVersions.id, pruned.map((row) => row.id)));
+  }
   return { file: updated, version, pruned };
 }
 
 /**
- * After a content change commits: drops the stale thumbnail and pruned versions' bytes (best-effort; leftovers only
- * cost storage), and re-assesses the new content for scanning unless it sits in a protected folder.
+ * After a content change commits: drops the legacy thumbnail, attempts journaled
+ * version cleanup, and re-assesses unprotected content for scanning.
  */
 export async function afterContentChange(file: DriveItem, pruned: DriveFileVersionRow[]): Promise<void> {
-  await Promise.allSettled([removeThumbnail(file.id), ...pruned.map((version) => removeVersionObject(version))]);
+  await Promise.allSettled([removeThumbnail(file.id), ...pruned.map((version) => cleanupVersion(version))]);
   if (!file.isProtected) after(() => prioritizeScans([file.id]));
 }

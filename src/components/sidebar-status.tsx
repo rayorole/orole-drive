@@ -2,8 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { HardDrive, Plug, TriangleAlert } from "lucide-react";
-import { getConnectedAgents } from "@/app/actions/mcp-status";
-import { getStorageUsage } from "@/app/actions/storage-usage";
+import { getConnectedAgents, getStorageUsage } from "@/lib/drive-read-client";
 import type { StorageCategory, StorageQuota, StorageUsageReport } from "@/lib/drive-types";
 import { cn } from "@/lib/utils";
 import { formatBytes } from "@/lib/format-bytes";
@@ -35,12 +34,12 @@ export function UsageBar({ usage, total, className }: { usage: StorageUsageRepor
   </div>;
 }
 
-/** Drive usage report. Keyed under "drive" so every drive mutation's invalidation refreshes it. */
+/** Storage is independent of listing and metadata refreshes. */
 export function useStorageUsage() {
   return useQuery({
-    queryKey: ["drive", "storage-usage"],
-    queryFn: async () => {
-      const result = await getStorageUsage();
+    queryKey: ["storage-usage"],
+    queryFn: async ({ signal }) => {
+      const result = await getStorageUsage(signal);
       if (!result.success) throw new Error(result.error);
       return result.data;
     },
@@ -102,8 +101,8 @@ export function StorageCard({ collapsed, onOpen }: { collapsed: boolean; onOpen:
 export function useConnectedAgents() {
   return useQuery({
     queryKey: ["mcp-agents"],
-    queryFn: async () => {
-      const result = await getConnectedAgents();
+    queryFn: async ({ signal }) => {
+      const result = await getConnectedAgents(signal);
       if (!result.success) throw new Error(result.error);
       return result.data;
     },

@@ -5,12 +5,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, Folder, LockKeyhole } from "lucide-react";
 import { toast } from "sonner";
 import {
-  listDrive,
   moveItems,
   permanentlyDeleteItems,
   trashItems,
 } from "@/app/actions/drive";
 import { setFolderPassword } from "@/app/actions/folder-security";
+import { listDrive, currentDriveAccessGeneration, assertDriveAccessGeneration } from "@/lib/drive-read-client";
 import type { DriveItem } from "@/lib/drive-types";
 import { optimisticDriveChange } from "@/lib/drive-cache";
 import { canEditItem } from "@/lib/drive-permissions";
@@ -52,14 +52,14 @@ export function DriveMoveDialog({
   const key = ["drive-move-folders", folderId];
   const listing = useQuery({
     queryKey: key,
-    queryFn: async () => {
-      const result = await listDrive({ folderId, foldersOnly: true });
+    queryFn: async ({ signal }) => {
+      const result = await listDrive({ folderId, foldersOnly: true }, signal);
       if (!result.success)
         throw new DriveAccessError(result.error, result.lockedFolder);
       return result.data;
     },
     retry: false,
-    staleTime: 0,
+    staleTime: 15_000,
     gcTime: 0,
     refetchOnWindowFocus: false,
   });
@@ -76,10 +76,12 @@ export function DriveMoveDialog({
     if (opening) return;
     setOpening(true);
     setOpenError("");
+    const generation = currentDriveAccessGeneration();
     try {
       const result = await run(() =>
         listDrive({ folderId: id, foldersOnly: true }),
       );
+      assertDriveAccessGeneration(generation);
       client.setQueryData(["drive-move-folders", id], result);
       setFolderId(id);
     } catch (error) {
@@ -125,6 +127,7 @@ export function DriveMoveDialog({
     },
     onSettled: () => {
       void client.invalidateQueries({ queryKey: ["drive"] });
+      void client.invalidateQueries({ queryKey: ["storage-usage"] });
     },
   });
   const busy = opening || mutation.isPending;
@@ -314,6 +317,7 @@ export function DriveTrashDialog({
     },
     onSettled: () => {
       void client.invalidateQueries({ queryKey: ["drive"] });
+      void client.invalidateQueries({ queryKey: ["storage-usage"] });
     },
   });
   return (

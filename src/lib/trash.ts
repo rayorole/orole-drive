@@ -7,23 +7,34 @@ import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, or, sql } from "driz
 import { after } from "next/server";
 import { assertItemAccess, assertItemsAccess, discoverableRootsCondition, visibleItemsCondition, withDriveTransaction } from "@/lib/drive-access";
 import { DriveError } from "@/lib/drive-errors";
-import { driveEvents, driveFileVersions, driveFolderUnlocks, driveItems } from "@/lib/drive-schema";
+import { driveEvents, driveFileVersions, driveFolderUnlocks, driveItems, driveUploadWork } from "@/lib/drive-schema";
 import { childFirst, folderPath, loadTree, restoreRows, selectedRows } from "@/lib/drive-tree";
-import { pruneExpiredUploads, removeObject, removeVersionObject } from "@/lib/storage";
+import { cleanupUpload, ensureUploadWork, pruneExpiredUploads, removeObject, removeVersionObject } from "@/lib/storage";
+import { withStorageObjectLock } from "@/lib/storage-work";
 import { recordEvents, SYSTEM_ACTOR, type DriveEventDetails } from "@/lib/activity";
 
-async function removeRows(tx: DriveTransaction, rows: DriveRow[]): Promise<void> {
-  // Keep every tombstone until all object deletions succeed. A rollback can never
-  // make partially deleted data restorable: deletionStartedAt was committed first.
-  const fileIds = rows.filter((row) => row.kind === "file").map((row) => row.id);
-  if (fileIds.length) {
-    // Kept versions and unfinished replacement uploads store bytes under these files' keys;
-    // their rows go with the file (cascade), so their objects must go first.
-    for (const version of await tx.select().from(driveFileVersions).where(inArray(driveFileVersions.itemId, fileIds))) await removeVersionObject(version);
-    for (const pending of await tx.select().from(driveItems).where(inArray(driveItems.replacesId, fileIds))) await removeObject(pending);
-  }
-  for (const row of rows) if (row.kind === "file") await removeObject(row);
-  for (const row of childFirst(rows)) await tx.delete(driveItems).where(eq(driveItems.id, row.id));
+async function removeRows(ids: string[]): Promise<void> {
+  const plan = await withDriveTransaction("write", async (tx) => {
+    const rows = await tx.select().from(driveItems).where(and(inArray(driveItems.id, ids), isNotNull(driveItems.deletionStartedAt)));
+    const fileIds = rows.filter((row) => row.kind === "file").map((row) => row.id);
+    const versions = fileIds.length ? await tx.select().from(driveFileVersions).where(inArray(driveFileVersions.itemId, fileIds)) : [];
+    const replacements = fileIds.length ? await tx.select().from(driveItems).where(inArray(driveItems.replacesId, fileIds)) : [];
+    const pending = [...rows.filter((row) => row.state === "pending"), ...replacements];
+    for (const row of pending) {
+      await ensureUploadWork(tx, row);
+      await tx.update(driveUploadWork).set({ status: "cancelled" }).where(eq(driveUploadWork.id, row.id));
+      await tx.update(driveItems).set({ deletionStartedAt: new Date() }).where(eq(driveItems.id, row.id));
+    }
+    return { rows, versions, pending };
+  });
+  // No hierarchy lock while waiting on object claims or storage. The committed
+  // deletion gate prevents restoration, new versions and fresh upload signing.
+  for (const row of plan.pending) await cleanupUpload(row.id);
+  for (const version of plan.versions) await withStorageObjectLock(version.objectKey, () => removeVersionObject(version));
+  for (const row of plan.rows) if (row.kind === "file" && row.state === "complete") await withStorageObjectLock(row.objectKey!, () => removeObject(row));
+  await withDriveTransaction("write", async (tx) => {
+    for (const row of childFirst(plan.rows)) await tx.delete(driveItems).where(and(eq(driveItems.id, row.id), isNotNull(driveItems.deletionStartedAt)));
+  });
 }
 
 /**
@@ -63,14 +74,12 @@ export async function cancelTrashedUploads(pendingIds: string[]): Promise<void> 
   await withDriveTransaction("write", async (tx) => {
     const rows = await tx.select().from(driveItems).where(and(inArray(driveItems.id, pendingIds), eq(driveItems.state, "pending"), isNotNull(driveItems.trashedAt)));
     for (const row of rows) {
-      try {
-        await removeObject(row);
-      } catch {
-        continue;
-      }
-      await tx.delete(driveItems).where(eq(driveItems.id, row.id));
+      await ensureUploadWork(tx, row);
+      await tx.update(driveUploadWork).set({ status: "cancelled" }).where(eq(driveUploadWork.id, row.id));
+      await tx.update(driveItems).set({ deletionStartedAt: new Date() }).where(eq(driveItems.id, row.id));
     }
   }).catch(() => undefined);
+  for (const id of pendingIds) await cleanupUpload(id).catch(() => undefined);
 }
 
 export async function trashDriveItems(ctx: DriveContext, ids: string[]): Promise<void> {
@@ -131,9 +140,7 @@ async function removeDeleting(ids: string[], deadline = Infinity): Promise<strin
   while (next < ordered.length && Date.now() < deadline) {
     const batch = ordered.slice(next, next + REMOVE_BATCH).map((row) => row.id);
     try {
-      await withDriveTransaction("write", async (tx) => {
-        await removeRows(tx, await tx.select().from(driveItems).where(and(inArray(driveItems.id, batch), isNotNull(driveItems.deletionStartedAt))));
-      });
+      await removeRows(batch);
     } catch {
       break;
     }
@@ -263,13 +270,9 @@ export async function purgeExpiredTrash(): Promise<{ purged: number; failed: num
     for (const id of ids) {
       attempted.add(id);
       try {
-        const removed = await withDriveTransaction("write", async (tx) => {
-          const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id));
-          if (!row) return false;
-          if (!row.trashedAt || !row.deletionStartedAt) return false;
-          await removeRows(tx, [row]);
-          return true;
-        });
+        const [row] = await withDriveTransaction("read", (tx) => tx.select().from(driveItems).where(and(eq(driveItems.id, id), isNotNull(driveItems.trashedAt), isNotNull(driveItems.deletionStartedAt))));
+        const removed = Boolean(row);
+        if (removed) await removeRows([id]);
         if (removed) purged += 1;
       } catch {
         failed += 1;

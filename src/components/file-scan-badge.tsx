@@ -5,7 +5,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ShieldAlert, ShieldCheck, ShieldQuestion, ShieldX } from "lucide-react";
 import { toast } from "sonner";
 import type { DriveItem } from "@/lib/drive-types";
-import { getFileScanStatus, getPublicFileScanStatus, submitFileScan } from "@/app/actions/virustotal";
+import { submitFileScan } from "@/app/actions/virustotal";
+import { getFileScanStatus, getPublicFileScanStatus } from "@/lib/drive-read-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -34,8 +35,8 @@ export function FileScanBadge({ token, itemId, size, canManage }: FileScanBadgeP
   const queryKey = isPrivate ? ["private-file-scan", itemId] : ["public-file-scan", token];
   const status = useQuery({
     queryKey,
-    queryFn: async () => {
-      const result = itemId !== undefined ? await getFileScanStatus(itemId) : await getPublicFileScanStatus(token!);
+    queryFn: async ({ signal }) => {
+      const result = itemId !== undefined ? await getFileScanStatus(itemId, signal) : await getPublicFileScanStatus(token!, signal);
       if (!result.success) throw new Error(result.error);
       return result.data;
     },
@@ -118,8 +119,8 @@ function useWatchedScan(itemId: string, { refreshWhenSettled }: { refreshWhenSet
   const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: ["private-file-scan", itemId],
-    queryFn: async () => {
-      const result = await getFileScanStatus(itemId);
+    queryFn: async ({ signal }) => {
+      const result = await getFileScanStatus(itemId, signal);
       if (!result.success) throw new Error(result.error);
       return result.data;
     },
