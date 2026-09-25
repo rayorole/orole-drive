@@ -5,14 +5,17 @@ import { Cloud, LockKeyhole } from "lucide-react";
 import { LoginForm } from "@/components/login-form";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { getSession } from "@/lib/auth";
+import { oauthQueryFromSearchParams } from "@/lib/mcp-auth";
 
 export const metadata: Metadata = {
   title: "Sign in",
   description: "Sign in to your family’s shared drive.",
 };
 
-export default async function LoginPage() {
-  if (await getSession()) redirect("/");
+export default async function LoginPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+  const oauthQuery = oauthQueryFromSearchParams(await searchParams);
+  // An OAuth login prompt may require a fresh session even if cookies exist.
+  if (!oauthQuery && await getSession()) redirect("/");
 
   return (
     <div className="flex min-h-svh flex-col bg-background">
@@ -33,7 +36,7 @@ export default async function LoginPage() {
             <p className="text-sm text-muted-foreground">Photos, documents, and everyday things. Together.</p>
           </div>
         </div>
-        <LoginForm />
+        <LoginForm oauthQuery={oauthQuery} />
       </main>
       <footer className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 px-5 py-6 text-center text-xs text-muted-foreground">
         <LockKeyhole className="size-3.5" aria-hidden="true" />

@@ -15,23 +15,19 @@ import {
   UploadPartCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { and, eq, lte, sql } from "drizzle-orm";
-import { getDb } from "@/lib/db";
-import { driveItems, type DriveRow } from "@/lib/drive-schema";
-import { MULTIPART_PART_BYTES, type DriveItem, type UploadTicket } from "@/lib/drive-types";
+import { and, eq, isNotNull, lte, or, sql } from "drizzle-orm";
+import type { DriveRow } from "@/lib/drive-schema";
+import type { DriveItem, UploadTicket } from "@/lib/drive-types";
+import { canAccessPublic, withDriveTransaction } from "@/lib/drive-access";
+import { DriveError } from "@/lib/drive-errors";
+import { driveItems } from "@/lib/drive-schema";
+import { MULTIPART_PART_BYTES } from "@/lib/drive-types";
+import { getPreviewKind } from "@/lib/file-preview";
 
 const DOWNLOAD_TTL_SECONDS = 60;
 const UPLOAD_TTL_SECONDS = 60 * 60;
 const MULTIPART_UPLOAD_TTL_SECONDS = 24 * 60 * 60;
 const PUBLIC_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-const PREVIEW_TYPES: Record<string, true> = {
-  "image/jpeg": true, "image/png": true, "image/gif": true, "image/webp": true, "image/avif": true, "image/bmp": true,
-  "audio/mpeg": true, "audio/mp4": true, "audio/ogg": true, "audio/wav": true, "audio/webm": true, "audio/flac": true, "audio/aac": true,
-  "video/mp4": true, "video/webm": true, "video/ogg": true, "video/quicktime": true,
-  "application/pdf": true,
-};
-
-export class DriveError extends Error {}
 
 let storageClient: S3Client | undefined;
 
@@ -73,7 +69,15 @@ export function toDriveItem(row: DriveRow): DriveItem {
     mimeType: row.mimeType,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
-    publicToken: row.publicToken,
+    publicToken: row.publicToken && (!row.publicExpiresAt || row.publicExpiresAt.getTime() > Date.now()) ? row.publicToken : null,
+    trashedAt: row.trashedAt?.toISOString() ?? null,
+    hasPassword: Boolean(row.passwordHash),
+    isLocked: Boolean(row.passwordHash),
+    isProtected: Boolean(row.passwordHash),
+    tags: row.tags,
+    description: row.description,
+    folderColor: row.folderColor,
+    isFavorite: false,
   };
 }
 
@@ -97,7 +101,7 @@ function stagedObjectKey(row: DriveRow) {
 }
 
 export async function createMultipartUpload(row: DriveRow): Promise<string> {
-  if (row.state !== "pending" || !row.mimeType) {
+  if (row.state !== "pending" || row.trashedAt || !row.mimeType) {
     throw new DriveError("This upload is no longer available.");
   }
   const { client, bucket } = storage();
@@ -126,7 +130,7 @@ export async function abortMultipartUpload(row: DriveRow) {
 }
 
 export async function signUpload(row: DriveRow): Promise<UploadTicket> {
-  if (row.state !== "pending" || !row.mimeType) {
+  if (row.state !== "pending" || row.trashedAt || !row.mimeType) {
     throw new DriveError("This upload is no longer available.");
   }
   const { client, bucket } = storage();
@@ -233,6 +237,7 @@ async function commitMultipartUpload(row: DriveRow, uploadId: string): Promise<s
 }
 
 export async function commitUpload(row: DriveRow): Promise<string> {
+  if (row.state !== "pending" || row.trashedAt) throw new DriveError("This upload is no longer available.");
   // Persisted mode preserves older large uploads that still use the single PUT path.
   if (row.multipartUploadId) return commitMultipartUpload(row, row.multipartUploadId);
   const { client, bucket } = storage();
@@ -259,16 +264,22 @@ export async function removeObject(row: DriveRow) {
   // A pending row may already have a final object if a completion transaction failed.
   await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: objectKey(row) }));
   await removeStagedObject(row);
+  await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: `thumbnails/${row.id}/preview-v1.webp` }));
 }
 
 export async function pruneExpiredUploads() {
-  await getDb().transaction(async (tx) => {
+  await withDriveTransaction("write", async (tx) => {
     const expired = await tx.select().from(driveItems).where(and(
       eq(driveItems.state, "pending"),
-      lte(driveItems.createdAt, sql`now() - interval '24 hours'`),
-    )).for("update", { skipLocked: true });
+      or(isNotNull(driveItems.trashedAt), lte(driveItems.createdAt, sql`now() - interval '24 hours'`)),
+    )).limit(100).for("update");
     for (const row of expired) {
-      await removeObject(row);
+      try {
+        await removeObject(row);
+      } catch {
+        // Keep the pending tombstone so a later cleanup can safely retry.
+        continue;
+      }
       await tx.delete(driveItems).where(eq(driveItems.id, row.id));
     }
   });
@@ -282,18 +293,83 @@ function contentDisposition(name: string, inline: boolean) {
   return `${inline ? "inline" : "attachment"}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 
-export async function signDownload(row: DriveRow, preview = false): Promise<string | null> {
-  if (row.state !== "complete" || row.kind !== "file" || !row.etag || !row.mimeType) {
+export async function signDownload(row: DriveRow, preview = false, expiresIn = DOWNLOAD_TTL_SECONDS): Promise<string | null> {
+  if (row.state !== "complete" || row.trashedAt || row.kind !== "file" || !row.etag || !row.mimeType) {
     throw new DriveError("This file is not available for download.");
   }
-  if (preview && PREVIEW_TYPES[row.mimeType] !== true) return null;
+  const previewKind = preview ? getPreviewKind(row) : null;
+  if (preview && !previewKind) return null;
+  if (expiresIn < 1) return null;
   const { client, bucket } = storage();
   return getSignedUrl(client, new GetObjectCommand({
     Bucket: bucket,
     Key: objectKey(row),
     ResponseContentDisposition: contentDisposition(row.name, preview),
-    ResponseContentType: preview ? row.mimeType : "application/octet-stream",
+    ResponseContentType: previewKind === "text" ? "text/plain; charset=utf-8" : preview ? row.mimeType : "application/octet-stream",
     ResponseCacheControl: "private, no-store, max-age=0",
+  }), { expiresIn: Math.min(DOWNLOAD_TTL_SECONDS, Math.floor(expiresIn)) });
+}
+
+export async function readFileBytes(row: DriveRow, maxBytes: number): Promise<Uint8Array | null> {
+  if (row.state !== "complete" || row.trashedAt || row.kind !== "file" || row.size > maxBytes || row.size === 0) return null;
+  const { client, bucket } = storage();
+  const abort = new AbortController();
+  const response = await client.send(new GetObjectCommand({
+    Bucket: bucket, Key: objectKey(row), Range: `bytes=0-${maxBytes}`,
+  }), { abortSignal: abort.signal });
+  if (!response.Body) return null;
+  const reader = response.Body.transformToWebStream().getReader();
+  const bytes = new Uint8Array(row.size);
+  let offset = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      if (offset + chunk.value.byteLength > bytes.byteLength) {
+        abort.abort();
+        return null;
+      }
+      bytes.set(chunk.value, offset);
+      offset += chunk.value.byteLength;
+    }
+    return offset === row.size ? bytes : null;
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+
+function thumbnailKey(key: string): string {
+  if (!/^thumbnails\/[0-9a-f-]{36}\/preview-v1\.webp$/.test(key)) {
+    throw new DriveError("This thumbnail is not available.");
+  }
+  return key;
+}
+
+export async function thumbnailExists(key: string): Promise<boolean> {
+  const { client, bucket } = storage();
+  try {
+    await client.send(new HeadObjectCommand({ Bucket: bucket, Key: thumbnailKey(key) }));
+    return true;
+  } catch (error) {
+    if (error instanceof Error && (error.name === "NotFound" || error.name === "NoSuchKey")) return false;
+    throw error;
+  }
+}
+
+export async function writeThumbnail(key: string, bytes: Uint8Array): Promise<void> {
+  const { client, bucket } = storage();
+  await client.send(new PutObjectCommand({
+    Bucket: bucket, Key: thumbnailKey(key), Body: bytes, ContentType: "image/webp",
+    CacheControl: "private, no-store, max-age=0",
+  }));
+}
+
+export async function signThumbnail(key: string): Promise<string> {
+  const { client, bucket } = storage();
+  return getSignedUrl(client, new GetObjectCommand({
+    Bucket: bucket, Key: thumbnailKey(key), ResponseContentType: "image/webp",
+    ResponseContentDisposition: "inline", ResponseCacheControl: "private, no-store, max-age=0",
   }), { expiresIn: DOWNLOAD_TTL_SECONDS });
 }
 
@@ -321,15 +397,16 @@ export async function getPublicFile(token: string): Promise<{
   sharedByEmail: string | null;
 } | null> {
   if (!PUBLIC_TOKEN_PATTERN.test(token)) return null;
-  return getDb().transaction(async (tx) => {
-    // Revocation/deletion waits for issued links; requests after it commits see no share.
+  return withDriveTransaction("read", async (tx) => {
     const [row] = await tx.select().from(driveItems).where(and(
       eq(driveItems.publicToken, token),
       eq(driveItems.kind, "file"),
       eq(driveItems.state, "complete"),
+      sql`(${driveItems.publicExpiresAt} is null or ${driveItems.publicExpiresAt} > clock_timestamp())`,
     )).limit(1).for("share");
-    if (!row) return null;
-    const [downloadUrl, previewUrl] = await Promise.all([signDownload(row), signDownload(row, true)]);
+    if (!row || !(await canAccessPublic(tx, row))) return null;
+    const expiresIn = row.publicExpiresAt ? Math.min(DOWNLOAD_TTL_SECONDS, Math.floor((row.publicExpiresAt.getTime() - Date.now()) / 1000)) : DOWNLOAD_TTL_SECONDS;
+    const [downloadUrl, previewUrl] = await Promise.all([signDownload(row, false, expiresIn), signDownload(row, true, expiresIn)]);
     if (!downloadUrl) return null;
     // Never expose the family's folder structure through an unauthenticated share page.
     return { item: { ...toDriveItem(row), parentId: null }, downloadUrl, previewUrl, sharedByEmail: row.sharedByEmail };

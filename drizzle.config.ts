@@ -4,7 +4,7 @@ import { defineConfig } from "drizzle-kit";
 loadEnvConfig(process.cwd());
 
 export default defineConfig({
-  schema: ["./src/lib/auth-schema.ts", "./src/lib/drive-schema.ts"],
+  schema: ["./src/lib/auth-schema.ts", "./src/lib/drive-schema.ts", "./src/lib/virustotal-schema.ts", "./src/lib/mcp-schema.ts"],
   out: "./drizzle",
   dialect: "postgresql",
   dbCredentials: {

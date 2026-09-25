@@ -1,37 +1,22 @@
 "use server";
 
+import type { SQL } from "drizzle-orm";
+import type { DriveContext, DriveTransaction } from "@/lib/drive-access";
+import type { DriveRow } from "@/lib/drive-schema";
+import type { ActionResult, DriveArchiveManifest, DriveItem, DriveListInput, DriveListing, DriveRestoreResult, UploadTicket } from "@/lib/drive-types";
 import { randomUUID } from "node:crypto";
-import { and, asc, count, desc, eq, ilike, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
+import { and, arrayContains, asc, count, desc, eq, gte, ilike, inArray, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
 import { z } from "zod";
-import { FamilyAuthError, requireFamily } from "@/lib/auth";
-import { getDb, type Database, type DriveTransaction as Transaction } from "@/lib/db";
-import { driveItems, type DriveRow } from "@/lib/drive-schema";
-import {
-  MAX_UPLOAD_BYTES,
-  MULTIPART_THRESHOLD_BYTES,
-  type ActionResult,
-  type DriveFilter,
-  type DriveItem,
-  type DriveListing,
-  type UploadTicket,
-} from "@/lib/drive-types";
-import {
-  abortMultipartUpload,
-  commitUpload,
-  createMultipartUpload,
-  createObjectKey,
-  createPublicToken,
-  DriveError,
-  pruneExpiredUploads,
-  publicShareUrl,
-  removeObject,
-  removeStagedObject,
-  signDownload,
-  signUpload,
-  toDriveItem,
-} from "@/lib/storage";
+import { assertItemAccess, assertItemsAccess, canAccessPublic, driveAction, getItemAccess, getItemsAccess, visibleItemsCondition, withDriveTransaction } from "@/lib/drive-access";
+import { DriveError } from "@/lib/drive-errors";
+import { driveActivity, driveFavorites, driveItems } from "@/lib/drive-schema";
+import { assertMoveDepth, folderPath, loadTree, MAX_FOLDER_DEPTH, selectedRows } from "@/lib/drive-tree";
+import { MAX_UPLOAD_BYTES, MULTIPART_THRESHOLD_BYTES } from "@/lib/drive-types";
+import { abortMultipartUpload, commitUpload, createMultipartUpload, createObjectKey, createPublicToken, publicShareUrl, removeObject, removeStagedObject, signDownload, signUpload, toDriveItem } from "@/lib/storage";
+import { permanentlyDeleteDriveItems, restoreDriveItems, trashDriveItems } from "@/lib/trash";
 
 const idSchema = z.uuid("Choose a valid file or folder.");
+const idsSchema = z.array(idSchema).min(1, "Choose at least one file or folder.").max(1000, "Choose up to 1,000 items at a time.").transform((ids) => [...new Set(ids)]);
 const parentSchema = idSchema.nullable().optional().transform((id) => id ?? null);
 const nameSchema = z.string().trim().normalize().min(1, "Enter a name.").max(255, "Names must be 255 characters or fewer.").refine(
   (name) => name !== "." && name !== ".." && !name.includes("/") && !name.includes("\\") &&
@@ -43,131 +28,135 @@ const mimeSchema = z.string().trim().toLowerCase().max(127).regex(
   "Choose a file with a valid content type.",
 );
 
-async function familyAction<T>(work: (email: string) => Promise<T>): Promise<ActionResult<T>> {
-  try {
-    const session = await requireFamily();
-    return { success: true, data: await work(session.user.email) };
-  } catch (error) {
-    if (error instanceof DriveError || error instanceof FamilyAuthError) {
-      return { success: false, error: error.message };
-    }
-    if (error instanceof z.ZodError) {
-      return { success: false, error: error.issues[0]?.message ?? "Check the information and try again." };
-    }
-    return { success: false, error: "The drive could not complete that request. Please try again." };
-  }
+const itemType = sql<string>`case
+  when ${driveItems.kind} = 'folder' then 'folder'
+  when ${driveItems.name} ~* '\\.(json|jsonl|js|jsx|ts|tsx|mjs|cjs|html?|css|scss|less|xml|svg|ya?ml|toml|ini|conf|sh|bash|zsh|ps1|bat|cmd|py|rb|php|go|rs|java|kt|swift|c|h|cpp|hpp|cs|sql|vue|svelte|dockerfile|gitignore)$'
+    or ${driveItems.mimeType} in ('application/json', 'application/xml', 'text/html', 'text/css', 'text/javascript', 'application/javascript') then 'code'
+  when ${driveItems.mimeType} like 'image/%' then 'image'
+  when ${driveItems.mimeType} like 'video/%' then 'video'
+  when ${driveItems.mimeType} like 'audio/%' then 'audio'
+  when ${driveItems.mimeType} = 'application/pdf' or ${driveItems.name} ~* '\\.pdf$' then 'pdf'
+  when ${driveItems.name} ~* '\\.(zip|rar|7z|tar|gz|bz2|xz|tgz|zst)$'
+    or ${driveItems.mimeType} in ('application/zip', 'application/x-7z-compressed', 'application/x-rar-compressed', 'application/gzip', 'application/x-tar') then 'archive'
+  when ${driveItems.mimeType} like 'text/%' or ${driveItems.name} ~* '\\.(txt|md|markdown|csv|tsv|log|rst|nfo)$' then 'text'
+  else 'other' end`;
+
+async function itemData(tx: DriveTransaction, ctx: DriveContext, row: DriveRow): Promise<DriveItem> {
+  return { ...toDriveItem(row), ...await getItemAccess(tx, ctx, row) };
 }
 
-async function folderTrail(db: Database | Transaction, folderId: string | null) {
-  const breadcrumbs: DriveListing["breadcrumbs"] = [];
-  const seen = new Set<string>();
-  let cursor = folderId;
-  while (cursor) {
-    if (seen.has(cursor) || breadcrumbs.length >= 64) {
-      throw new DriveError("This folder path is too deep or is unavailable.");
-    }
-    seen.add(cursor);
-    const [folder] = await db.select({ id: driveItems.id, name: driveItems.name, parentId: driveItems.parentId })
-      .from(driveItems).where(and(
-        eq(driveItems.id, cursor), eq(driveItems.kind, "folder"), eq(driveItems.state, "complete"),
-      )).limit(1);
-    if (!folder) throw new DriveError("This folder is no longer available.");
-    breadcrumbs.push({ id: folder.id, name: folder.name });
-    cursor = folder.parentId;
-  }
-  return breadcrumbs.reverse();
+async function requireItem(tx: DriveTransaction, ctx: DriveContext, id: string): Promise<DriveRow> {
+  const [row] = await tx.select().from(driveItems).where(and(eq(driveItems.id, id), eq(driveItems.state, "complete")));
+  if (!row) throw new DriveError("This file or folder is no longer available.");
+  await assertItemAccess(tx, ctx, row);
+  return row;
 }
 
-async function lockParent(tx: Transaction, parentId: string | null, addingFolder = false) {
-  if (!parentId) return;
-  // A matching lock in deletion prevents a child being inserted into a disappearing folder.
-  const [parent] = await tx.select({ id: driveItems.id }).from(driveItems).where(and(
-    eq(driveItems.id, parentId), eq(driveItems.kind, "folder"), eq(driveItems.state, "complete"),
-  )).for("update");
-  if (!parent) throw new DriveError("The destination folder is no longer available.");
-  const trail = await folderTrail(tx, parentId);
-  if (addingFolder && trail.length >= 64) throw new DriveError("Folders can be nested up to 64 levels deep.");
+async function destination(tx: DriveTransaction, ctx: DriveContext, parentId: string | null, addingFolder = false): Promise<DriveRow[]> {
+  const path = await folderPath(tx, parentId);
+  if (path.length) await assertItemAccess(tx, ctx, path[path.length - 1]);
+  else await assertItemsAccess(tx, ctx, []);
+  if (addingFolder && path.length >= MAX_FOLDER_DEPTH) throw new DriveError("Folders can be nested up to 64 levels deep.");
+  return path;
 }
 
-export async function listDrive(input: {
-  folderId?: string | null;
-  filter?: DriveFilter;
-  search?: string;
-} = {}): Promise<ActionResult<DriveListing>> {
-  return familyAction(async () => {
-    const { folderId, filter, search } = z.object({
+export async function listDrive(input: DriveListInput = {}): Promise<ActionResult<DriveListing>> {
+  return driveAction(async (ctx) => {
+    const parsed = z.object({
       folderId: parentSchema,
-      filter: z.enum(["all", "public", "recent"]).default("all"),
+      filter: z.enum(["all", "public", "recent", "trash", "favorites"]).default("all"),
       search: z.string().trim().max(200, "Search must be 200 characters or fewer.").default(""),
-    }).parse(input);
-    await pruneExpiredUploads();
-    return getDb().transaction(async (tx) => {
-      const breadcrumbs = await folderTrail(tx, folderId);
-      const conditions: SQL[] = [eq(driveItems.state, "complete")];
-      if (filter === "public") conditions.push(eq(driveItems.kind, "file"), isNotNull(driveItems.publicToken));
-      if (filter === "recent") conditions.push(eq(driveItems.kind, "file"));
-      if (search) {
-        const escapedSearch = search.replace(/[\\%_]/g, "\\$&");
-        conditions.push(ilike(driveItems.name, `%${escapedSearch}%`));
+      type: z.enum(["all", "folder", "image", "video", "audio", "pdf", "text", "code", "archive", "other"]).default("all"),
+      minSize: z.number().int().min(0).optional(),
+      maxSize: z.number().int().min(0).optional(),
+      after: z.iso.date().optional(),
+      before: z.iso.date().optional(),
+      sort: z.enum(["name", "updatedAt", "size", "type"]).optional(),
+      direction: z.enum(["asc", "desc"]).optional(),
+      foldersOnly: z.boolean().default(false),
+      tags: z.array(z.string().max(64)).max(20).optional(),
+    }).refine((value) => value.minSize === undefined || value.maxSize === undefined || value.minSize <= value.maxSize, "Minimum size must not exceed maximum size.")
+      .refine((value) => !value.after || !value.before || value.after <= value.before, "The start date must not be after the end date.").parse(input);
+    return withDriveTransaction("read", async (tx) => {
+      const { folderId, filter, search, type, minSize, maxSize, after, before, foldersOnly, tags } = parsed;
+      const trash = filter === "trash" && !foldersOnly;
+      const path = await folderPath(tx, folderId);
+      const current = path.at(-1);
+      if (current) {
+        await assertItemAccess(tx, ctx, current, { allowTrashed: trash });
+        if (trash && !current.trashedAt) throw new DriveError("This folder is not in Trash.");
       }
-      if (filter === "all" && !search) {
-        conditions.push(folderId ? eq(driveItems.parentId, folderId) : isNull(driveItems.parentId));
-      } else if (folderId) {
-        // Search and filtered views include descendants, not unrelated family folders.
-        conditions.push(sql`${driveItems.parentId} in (
-          with recursive descendants as (
-            select id, 1 as depth from drive_items where id = ${folderId}::uuid
-            union all
-            select child.id, descendants.depth + 1 from drive_items child
-            join descendants on child.parent_id = descendants.id
-            where child.kind = 'folder' and child.state = 'complete' and descendants.depth < 64
-          ) select id from descendants
+      const global = !foldersOnly && Boolean(search || type !== "all" || minSize !== undefined || maxSize !== undefined || after || before || tags?.length);
+      const conditions: SQL[] = [eq(driveItems.state, "complete"), visibleItemsCondition(ctx, { trash })];
+      conditions.push(trash ? isNotNull(driveItems.trashedAt) : isNull(driveItems.trashedAt));
+      if (foldersOnly) conditions.push(eq(driveItems.kind, "folder"));
+      else if (filter === "public") conditions.push(eq(driveItems.kind, "file"), isNotNull(driveItems.publicToken), sql`(${driveItems.publicExpiresAt} is null or ${driveItems.publicExpiresAt} > clock_timestamp())`);
+      else if (filter === "recent") conditions.push(eq(driveItems.kind, "file"), sql`exists (select 1 from drive_activity where drive_activity.item_id = ${driveItems.id} and drive_activity.user_id = ${ctx.userId})`);
+      else if (filter === "favorites") conditions.push(sql`exists (select 1 from drive_favorites where drive_favorites.item_id = ${driveItems.id} and drive_favorites.user_id = ${ctx.userId})`);
+      if (search) conditions.push(ilike(driveItems.name, `%${search.replace(/[\\%_]/g, "\\$&")}%`));
+      if (!foldersOnly && type !== "all") conditions.push(sql`${itemType} = ${type}`);
+      if (minSize !== undefined) conditions.push(gte(driveItems.size, minSize));
+      if (maxSize !== undefined) conditions.push(lte(driveItems.size, maxSize));
+      if (after) conditions.push(gte(driveItems.updatedAt, new Date(`${after}T00:00:00.000Z`)));
+      if (before) conditions.push(lt(driveItems.updatedAt, new Date(new Date(`${before}T00:00:00.000Z`).getTime() + 86_400_000)));
+      if (tags?.length) {
+        const wanted = [...new Set(tags.map((tag) => tag.trim().toLowerCase()).filter(Boolean))];
+        if (wanted.length) conditions.push(arrayContains(driveItems.tags, wanted));
+      }
+      if (!global && (foldersOnly || filter === "all" || trash)) {
+        if (folderId) conditions.push(eq(driveItems.parentId, folderId));
+        else if (trash) conditions.push(sql`not exists (
+          select 1 from drive_items parent where parent.id = ${driveItems.parentId}
+          and parent.trashed_at is not null and parent.trash_root_id is not distinct from ${driveItems.trashRootId}
         )`);
+        else conditions.push(isNull(driveItems.parentId));
       }
-      const query = tx.select().from(driveItems).where(and(...conditions));
-      const rows = filter === "recent"
-        ? await query.orderBy(desc(driveItems.updatedAt), asc(driveItems.id)).limit(100)
-        : await query.orderBy(desc(driveItems.kind), asc(driveItems.name), asc(driveItems.id));
+      const sort = parsed.sort ?? (filter === "recent" ? "updatedAt" : "name");
+      const direction = parsed.direction ?? (filter === "recent" ? "desc" : "asc");
+      const order = direction === "asc" ? asc : desc;
+      const recentActivityColumn = sql`(select accessed_at from drive_activity where item_id = ${driveItems.id} and user_id = ${ctx.userId})`;
+      const sortColumn = filter === "recent" && parsed.sort === undefined ? recentActivityColumn
+        : sort === "name" ? sql`lower(${driveItems.name})` : sort === "updatedAt" ? driveItems.updatedAt : sort === "size" ? driveItems.size : itemType;
+      const ordering = sort === "name" ? [desc(driveItems.kind), order(sortColumn), asc(driveItems.id)] : [order(sortColumn), asc(sql`lower(${driveItems.name})`), asc(driveItems.id)];
+      const query = tx.select().from(driveItems).where(and(...conditions)).orderBy(...ordering);
+      const rows = filter === "recent" && !global ? await query.limit(100) : await query;
       const [totals] = await tx.select({
-        totalBytes: sql<number>`coalesce(sum(${driveItems.size}), 0)`.mapWith(Number),
-        totalFiles: count(),
-      }).from(driveItems).where(and(eq(driveItems.state, "complete"), eq(driveItems.kind, "file")));
-      return { items: rows.map(toDriveItem), breadcrumbs, totalBytes: totals.totalBytes, totalFiles: totals.totalFiles };
-    }, { isolationLevel: "repeatable read", accessMode: "read only" });
-  });
+        totalBytes: sql<number>`coalesce(sum(${driveItems.size}), 0)`.mapWith(Number), totalFiles: count(),
+      }).from(driveItems).where(and(eq(driveItems.state, "complete"), eq(driveItems.kind, "file"), visibleItemsCondition(ctx), isNull(driveItems.trashedAt)));
+      const access = await getItemsAccess(tx, ctx, current ? [...rows, current] : rows);
+      const favoriteScope = current ? [...rows, current] : rows;
+      const favoriteIds = favoriteScope.length ? new Set((await tx.select({ id: driveFavorites.itemId }).from(driveFavorites)
+        .where(and(eq(driveFavorites.userId, ctx.userId), inArray(driveFavorites.itemId, favoriteScope.map((row) => row.id))))).map((row) => row.id)) : new Set<string>();
+      return {
+        items: rows.map((row) => ({ ...toDriveItem(row), ...access.get(row.id)!, isFavorite: favoriteIds.has(row.id) })),
+        breadcrumbs: path.map(({ id, name }) => ({ id, name })),
+        currentFolder: current ? { ...toDriveItem(current), ...access.get(current.id)!, isFavorite: favoriteIds.has(current.id) } : null,
+        totalBytes: totals.totalBytes, totalFiles: totals.totalFiles,
+      };
+    });
+  }, "read");
 }
 
 export async function createFolder(input: { name: string; parentId?: string | null }): Promise<ActionResult<DriveItem>> {
-  return familyAction(async () => {
+  return driveAction(async (ctx) => {
     const { name, parentId } = z.object({ name: nameSchema, parentId: parentSchema }).parse(input);
-    return getDb().transaction(async (tx) => {
-      await lockParent(tx, parentId, true);
-      const [folder] = await tx.insert(driveItems).values({
-        id: randomUUID(), name, parentId, kind: "folder", state: "complete", size: 0,
-      }).returning();
-      return toDriveItem(folder);
+    return withDriveTransaction("write", async (tx) => {
+      await destination(tx, ctx, parentId, true);
+      const [folder] = await tx.insert(driveItems).values({ id: randomUUID(), name, parentId, kind: "folder", state: "complete", size: 0 }).returning();
+      return itemData(tx, ctx, folder);
     });
   });
 }
 
-export async function beginUpload(input: {
-  name: string;
-  size: number;
-  mimeType: string;
-  parentId?: string | null;
-}): Promise<ActionResult<UploadTicket>> {
-  return familyAction(async () => {
+export async function beginUpload(input: { name: string; size: number; mimeType: string; parentId?: string | null }): Promise<ActionResult<UploadTicket>> {
+  return driveAction(async (ctx) => {
     const { name, size, mimeType, parentId } = z.object({
-      name: nameSchema,
-      size: z.number().int().min(0).max(MAX_UPLOAD_BYTES, "Files must be 5 GiB or smaller."),
-      mimeType: mimeSchema,
-      parentId: parentSchema,
+      name: nameSchema, size: z.number().int().min(0).max(MAX_UPLOAD_BYTES, "Files must be 5 GiB or smaller."), mimeType: mimeSchema, parentId: parentSchema,
     }).parse(input);
-    await pruneExpiredUploads();
     let multipartRow: DriveRow | undefined;
     try {
-      return await getDb().transaction(async (tx) => {
-        await lockParent(tx, parentId);
+      return await withDriveTransaction("write", async (tx) => {
+        await destination(tx, ctx, parentId);
         const id = randomUUID();
         const [row] = await tx.insert(driveItems).values({
           id, name, size, mimeType, parentId, kind: "file", state: "pending", objectKey: createObjectKey(id),
@@ -179,115 +168,140 @@ export async function beginUpload(input: {
         return signUpload(multipartRow);
       });
     } catch (error) {
-      // The transaction may fail after R2 creation, signing, or even during commit.
-      if (multipartRow) await abortMultipartUpload(multipartRow);
+      if (multipartRow) await abortMultipartUpload(multipartRow).catch(() => undefined);
       throw error;
     }
   });
 }
 
 export async function completeUpload(id: string): Promise<ActionResult<DriveItem>> {
-  return familyAction(async () => {
+  return driveAction(async (ctx) => {
     id = idSchema.parse(id);
-    const completed = await getDb().transaction(async (tx) => {
-      // Completion and deletion serialize on this row; neither can resurrect a deleted file.
+    const result = await withDriveTransaction("write", async (tx) => {
       const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id)).for("update");
       if (!row || row.kind !== "file") throw new DriveError("This upload is no longer available.");
-      if (row.state === "complete") return row;
+      await assertItemAccess(tx, ctx, row);
+      if (row.state === "complete") return { row, item: await itemData(tx, ctx, row) };
       const etag = await commitUpload(row);
-      const [completed] = await tx.update(driveItems).set({ state: "complete", etag, updatedAt: new Date() })
-        .where(eq(driveItems.id, id)).returning();
-      return completed;
+      const [completed] = await tx.update(driveItems).set({ state: "complete", etag, updatedAt: new Date() }).where(eq(driveItems.id, id)).returning();
+      await tx.insert(driveActivity).values({ userId: ctx.userId, itemId: id, accessedAt: new Date() })
+        .onConflictDoUpdate({ target: [driveActivity.userId, driveActivity.itemId], set: { accessedAt: new Date() } });
+      return { row: completed, item: await itemData(tx, ctx, completed) };
     });
-    // Cleanup is not part of committing the file. The uploads/ lifecycle is its backstop.
-    await removeStagedObject(completed).catch(() => undefined);
-    return toDriveItem(completed);
-  });
-}
-
-async function removeItem(id: string, pendingOnly: boolean) {
-  id = idSchema.parse(id);
-  await getDb().transaction(async (tx) => {
-    const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id)).for("update");
-    if (!row) return;
-    if (pendingOnly && (row.kind !== "file" || row.state !== "pending")) {
-      throw new DriveError("This upload has already completed. Use Delete to remove the file.");
-    }
-    if (row.kind === "folder") {
-      const children = await tx.select().from(driveItems).where(eq(driveItems.parentId, id)).for("update");
-      if (children.some((child) => child.state === "complete")) {
-        throw new DriveError("This folder contains files or subfolders. Remove them before deleting the folder.");
-      }
-      for (const child of children) {
-        await removeObject(child);
-        await tx.delete(driveItems).where(eq(driveItems.id, child.id));
-      }
-    } else {
-      await removeObject(row);
-    }
-    await tx.delete(driveItems).where(eq(driveItems.id, id));
+    // Never remove staging before the database commit: a rolled-back single PUT
+    // completion must still be retryable with the original verified source.
+    await removeStagedObject(result.row).catch(() => undefined);
+    return result.item;
   });
 }
 
 export async function cancelUpload(id: string): Promise<ActionResult<void>> {
-  return familyAction(() => removeItem(id, true));
-}
-
-export async function deleteItem(id: string): Promise<ActionResult<void>> {
-  return familyAction(() => removeItem(id, false));
-}
-
-export async function renameItem(input: { id: string; name: string }): Promise<ActionResult<void>> {
-  return familyAction(async () => {
-    const { id, name } = z.object({ id: idSchema, name: nameSchema }).parse(input);
-    const [renamed] = await getDb().update(driveItems).set({ name, updatedAt: new Date() })
-      .where(and(eq(driveItems.id, id), eq(driveItems.state, "complete"))).returning({ id: driveItems.id });
-    if (!renamed) throw new DriveError("This file or folder is no longer available.");
-  });
-}
-
-export async function setPublic(input: { id: string; enabled: boolean }): Promise<ActionResult<{ url: string | null }>> {
-  return familyAction(async (email) => {
-    const { id, enabled } = z.object({ id: idSchema, enabled: z.boolean() }).parse(input);
-    return getDb().transaction(async (tx) => {
-      const [row] = await tx.select().from(driveItems).where(and(
-        eq(driveItems.id, id), eq(driveItems.state, "complete"),
-      )).for("update");
-      if (!row) throw new DriveError("This file is no longer available.");
-      if (row.kind !== "file") throw new DriveError("Only files can have public links. Share the files inside this folder instead.");
-      const publicToken = enabled ? row.publicToken ?? createPublicToken() : null;
-      const url = publicToken ? publicShareUrl(publicToken) : null;
-      const sharedByEmail = enabled ? (row.publicToken ? row.sharedByEmail : email) : null;
-      await tx.update(driveItems).set({ publicToken, sharedByEmail, updatedAt: new Date() }).where(eq(driveItems.id, id));
-      return { url };
+  return driveAction(async (ctx) => {
+    id = idSchema.parse(id);
+    await withDriveTransaction("write", async (tx) => {
+      const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id)).for("update");
+      if (!row) return;
+      if (row.kind !== "file" || row.state !== "pending") throw new DriveError("This upload has already completed. Move the file to Trash instead.");
+      await assertItemAccess(tx, ctx, row, { allowTrashed: true });
+      await removeObject(row);
+      await tx.delete(driveItems).where(eq(driveItems.id, id));
     });
   });
 }
 
+export async function renameItem(input: { id: string; name: string }): Promise<ActionResult<void>> {
+  return driveAction(async (ctx) => {
+    const { id, name } = z.object({ id: idSchema, name: nameSchema }).parse(input);
+    await withDriveTransaction("write", async (tx) => {
+      await requireItem(tx, ctx, id);
+      await tx.update(driveItems).set({ name, updatedAt: new Date() }).where(eq(driveItems.id, id));
+    });
+  });
+}
+
+export async function moveItems(input: { ids: string[]; parentId: string | null }): Promise<ActionResult<void>> {
+  return driveAction(async (ctx) => {
+    const { ids, parentId } = z.object({ ids: idsSchema, parentId: parentSchema }).parse(input);
+    await withDriveTransaction("write", async (tx) => {
+      const selected = await selectedRows(tx, ids);
+      if (selected.some((row) => row.state !== "complete" || row.trashedAt)) throw new DriveError("Only available files and folders can be moved.");
+      const tree = await loadTree(tx, ids);
+      await assertItemsAccess(tx, ctx, tree.rows, { allowTrashed: true });
+      await assertItemsAccess(tx, ctx, selected);
+      const path = await destination(tx, ctx, parentId);
+      assertMoveDepth(tree, path);
+      if (path.some((folder) => Boolean(folder.passwordHash))) {
+        await tx.update(driveItems).set({ publicToken: null, publicExpiresAt: null, sharedByEmail: null }).where(inArray(driveItems.id, tree.rows.map((row) => row.id)));
+      }
+      await tx.update(driveItems).set({ parentId, updatedAt: new Date() }).where(inArray(driveItems.id, tree.roots.map((row) => row.id)));
+    });
+  });
+}
+
+export async function trashItems(ids: string[]): Promise<ActionResult<void>> {
+  return driveAction((ctx) => trashDriveItems(ctx, idsSchema.parse(ids)), "trash");
+}
+
+export async function restoreItems(ids: string[]): Promise<ActionResult<DriveRestoreResult>> {
+  return driveAction((ctx) => restoreDriveItems(ctx, idsSchema.parse(ids)));
+}
+
+export async function permanentlyDeleteItems(ids: string[]): Promise<ActionResult<void>> {
+  return driveAction((ctx) => permanentlyDeleteDriveItems(ctx, idsSchema.parse(ids)));
+}
+
+export async function getArchiveManifest(ids: string[]): Promise<ActionResult<DriveArchiveManifest>> {
+  return driveAction(async (ctx) => {
+    ids = idsSchema.parse(ids);
+    return withDriveTransaction("read", async (tx) => {
+      const selected = await selectedRows(tx, ids);
+      if (selected.some((row) => row.state !== "complete" || row.trashedAt)) throw new DriveError("Only available files and folders can be downloaded.");
+      const tree = await loadTree(tx, ids);
+      const rows = tree.rows.filter((row) => row.state === "complete" && !row.trashedAt);
+      await assertItemsAccess(tx, ctx, rows);
+      return { rootIds: tree.roots.map((row) => row.id), items: rows.map(({ id, parentId, name, kind, size }) => ({ id, parentId, name, kind, size })) };
+    });
+  }, "read");
+}
+
+export async function setPublic(input: { id: string; enabled: boolean; expiresIn?: number }): Promise<ActionResult<{ url: string | null }>> {
+  return driveAction(async (ctx) => {
+    const { id, enabled, expiresIn } = z.object({
+      id: idSchema, enabled: z.boolean(), expiresIn: z.number().int().min(1).max(31_536_000, "Public links can expire up to one year from now.").optional(),
+    }).parse(input);
+    return withDriveTransaction("write", async (tx) => {
+      const row = await requireItem(tx, ctx, id);
+      if (row.kind !== "file") throw new DriveError("Only files can have public links. Share the files inside this folder instead.");
+      if (enabled && !(await canAccessPublic(tx, row))) throw new DriveError("Files in password-protected folders cannot have public links.");
+      const now = new Date();
+      const existing = row.publicToken && (!row.publicExpiresAt || row.publicExpiresAt > now);
+      const publicToken = enabled ? (existing ? row.publicToken : createPublicToken()) : null;
+      const publicExpiresAt = enabled ? (expiresIn === undefined ? (existing ? row.publicExpiresAt : null) : new Date(now.getTime() + expiresIn * 1000)) : null;
+      const sharedByEmail = enabled ? (existing ? row.sharedByEmail : ctx.email) : null;
+      await tx.update(driveItems).set({ publicToken, publicExpiresAt, sharedByEmail, updatedAt: now }).where(eq(driveItems.id, id));
+      return { url: publicToken ? publicShareUrl(publicToken) : null };
+    });
+  }, "share");
+}
+
 export async function getDownloadUrl(id: string): Promise<ActionResult<{ url: string }>> {
-  return familyAction(async () => {
+  return driveAction(async (ctx) => {
     id = idSchema.parse(id);
-    return getDb().transaction(async (tx) => {
-      const [row] = await tx.select().from(driveItems).where(and(
-        eq(driveItems.id, id), eq(driveItems.kind, "file"), eq(driveItems.state, "complete"),
-      )).for("share");
-      if (!row) throw new DriveError("This file is no longer available.");
+    return withDriveTransaction("read", async (tx) => {
+      const row = await requireItem(tx, ctx, id);
       const url = await signDownload(row);
       if (!url) throw new DriveError("This file is not available for download.");
       return { url };
     });
-  });
+  }, "read");
 }
 
 export async function getPreviewUrl(id: string): Promise<ActionResult<{ url: string | null }>> {
-  return familyAction(async () => {
+  return driveAction(async (ctx) => {
     id = idSchema.parse(id);
-    return getDb().transaction(async (tx) => {
-      const [row] = await tx.select().from(driveItems).where(and(
-        eq(driveItems.id, id), eq(driveItems.kind, "file"), eq(driveItems.state, "complete"),
-      )).for("share");
-      if (!row) throw new DriveError("This file is no longer available.");
+    return withDriveTransaction("read", async (tx) => {
+      const row = await requireItem(tx, ctx, id);
       return { url: await signDownload(row, true) };
     });
-  });
+  }, "read");
 }

@@ -76,6 +76,14 @@
   --dropdown-close-dur: 65ms;
   --dropdown-pre-scale: .97;
   --surface-ease: cubic-bezier(.23, 1, .32, 1);
+  --tt-in-dur: 150ms;
+  --tt-out-dur: 50ms;
+  --tt-scale: .98;
+  --tt-delay: 80ms;
+  --tt-in-ease: var(--surface-ease);
+  --tt-out-ease: var(--surface-ease);
+  --tt-bg: var(--popover);
+  --tt-fg: var(--foreground);
   --press-spring: linear(0, .11 6%, .35 11%, .64 17%, .90 22%, 1.08 28%, 1.19 33%, 1.22 39%, 1.17 47%, 1.08 56%, 1 64%, .96 72%, .95 78%, .97 89%, 1);
 }
 
@@ -131,6 +139,20 @@
 [data-slot="dropdown-menu-content"][data-starting-style] { opacity: 0; scale: var(--dropdown-pre-scale); }
 [data-slot="dropdown-menu-content"][data-ending-style] { opacity: 0; scale: .99; transition-duration: var(--dropdown-close-dur); }
 
+/* transitions.dev Tooltip open/close, with Base UI owning positioning and hover/focus. */
+.t-tt {
+  background: var(--tt-bg);
+  color: var(--tt-fg);
+  box-shadow: 0 0 0 1px var(--border), var(--surface-shadow);
+  opacity: 1;
+  transform: scale(1);
+  transition: opacity var(--tt-in-dur) var(--tt-in-ease), transform var(--tt-in-dur) var(--tt-in-ease);
+  transition-delay: var(--tt-delay);
+}
+.t-tt[data-starting-style], .t-tt[data-ending-style] { opacity: 0; transform: scale(var(--tt-scale)); }
+.t-tt[data-ending-style] { transition-duration: var(--tt-out-dur); transition-timing-function: var(--tt-out-ease); transition-delay: 0ms; }
+.t-tt[data-instant] { transition: none; }
+
 @media (pointer: coarse) {
   [data-slot="button"], [data-slot="toggle-group-item"] { min-height: 2.75rem; min-width: 2.75rem; }
 }
@@ -138,6 +160,7 @@
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
   [data-slot="button"]:active:not(:disabled) { scale: 1; }
   [data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="dropdown-menu-content"] { scale: 1 !important; }
+  .t-tt { transition: none !important; transform: none !important; }
 }
 @media (prefers-reduced-transparency: reduce) {
   [class*="backdrop-blur"] { backdrop-filter: none !important; background-color: var(--background); }

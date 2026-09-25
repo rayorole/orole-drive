@@ -3,26 +3,31 @@
 import { useRef, useState, type SyntheticEvent } from "react";
 import Image from "next/image";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Download, Globe2, Link2, LockKeyhole, TriangleAlert } from "lucide-react";
+import { Check, Copy, Download, Globe2, Link2, Link2Off, LockKeyhole, QrCode, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
-import { createFolder, deleteItem, getDownloadUrl, getPreviewUrl, renameItem, setPublic } from "@/app/actions/drive";
+import { createFolder, getDownloadUrl, getPreviewUrl, renameItem, setPublic } from "@/app/actions/drive";
 import type { DriveItem } from "@/lib/drive-types";
+import { cn } from "@/lib/utils";
+import { getPreviewKind } from "@/lib/file-preview";
+import { optimisticDriveChange } from "@/lib/drive-cache";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Spinner } from "@/components/spinner";
 import { DriveFileIcon, fileType, formatBytes } from "@/components/drive-item";
 import { PdfPreview } from "@/components/pdf-preview";
+import { TextPreview } from "@/components/text-preview";
+import { ShareQr } from "@/components/share-qr";
+import { useFolderAccess } from "@/components/folder-access";
 
 export function useDriveDownload() {
+  const { run } = useFolderAccess();
   return useMutation({
     mutationFn: async (id: string) => {
-      const result = await getDownloadUrl(id);
-      if (!result.success) throw new Error(result.error);
-      return result.data.url;
+      const result = await run(() => getDownloadUrl(id));
+      return result.url;
     },
     onSuccess: (url) => {
       const anchor = document.createElement("a");
@@ -38,13 +43,16 @@ export function useDriveDownload() {
 export function DriveNameDialog({ item, parentId, onClose }: { item?: DriveItem; parentId: string | null; onClose: () => void }) {
   const [name, setName] = useState(item?.name ?? "");
   const queryClient = useQueryClient();
+  const { run } = useFolderAccess();
   const mutation = useMutation({
     mutationFn: async () => {
-      const result = item ? await renameItem({ id: item.id, name: name.trim() }) : await createFolder({ name: name.trim(), parentId });
-      if (!result.success) throw new Error(result.error);
+      if (item) await run(() => renameItem({ id: item.id, name: name.trim() }));
+      else await run(() => createFolder({ name: name.trim(), parentId }));
     },
+    onMutate: async () => item ? { rollback: await optimisticDriveChange(queryClient, { kind: "rename", id: item.id, name: name.trim() }) } : undefined,
+    onError: (_error, _variables, context) => context?.rollback(),
+    onSettled: () => { void queryClient.invalidateQueries({ queryKey: ["drive"] }); },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["drive"] });
       toast.success(item ? "Name updated" : "Folder created");
       onClose();
     },
@@ -72,42 +80,14 @@ export function DriveNameDialog({ item, parentId, onClose }: { item?: DriveItem;
   </Dialog>;
 }
 
-export function DriveDeleteDialog({ item, onClose }: { item: DriveItem; onClose: () => void }) {
-  const queryClient = useQueryClient();
-  const mutation = useMutation({
-    mutationFn: async () => {
-      const result = await deleteItem(item.id);
-      if (!result.success) throw new Error(result.error);
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["drive"] });
-      toast.success(item.kind === "folder" ? "Folder deleted" : "File deleted");
-      onClose();
-    },
-  });
-  return <AlertDialog open onOpenChange={(open) => { if (!open && !mutation.isPending) onClose(); }}>
-    <AlertDialogContent>
-      <AlertDialogHeader>
-        <AlertDialogTitle className="break-words">Delete “{item.name}”?</AlertDialogTitle>
-        <AlertDialogDescription>{item.kind === "folder" ? "This folder will be permanently deleted for the whole family. It must contain no files or folders. Any unfinished uploads inside it will be cancelled." : "This file will be permanently deleted for the whole family, and any public link will stop working."} This cannot be undone.</AlertDialogDescription>
-      </AlertDialogHeader>
-      {mutation.error && <p role="alert" className="text-sm text-destructive">{mutation.error.message}</p>}
-      <AlertDialogFooter>
-        <AlertDialogCancel disabled={mutation.isPending}>Keep {item.kind}</AlertDialogCancel>
-        <AlertDialogAction variant="destructive" disabled={mutation.isPending} onClick={() => mutation.mutate()}>{mutation.isPending && <Spinner />}Delete {item.kind}</AlertDialogAction>
-      </AlertDialogFooter>
-    </AlertDialogContent>
-  </AlertDialog>;
-}
-
 export function DriveShareDialog({ item, onClose }: { item: DriveItem; onClose: () => void }) {
   const queryClient = useQueryClient();
+  const { run } = useFolderAccess();
   const [url, setUrl] = useState<string | null>(item.publicToken ? `${window.location.origin}/s/${item.publicToken}` : null);
   const mutation = useMutation({
     mutationFn: async (enabled: boolean) => {
-      const result = await setPublic({ id: item.id, enabled });
-      if (!result.success) throw new Error(result.error);
-      return result.data.url;
+      const result = await run(() => setPublic({ id: item.id, enabled }));
+      return result.url;
     },
     onSuccess: (nextUrl) => {
       setUrl(nextUrl);
@@ -115,34 +95,48 @@ export function DriveShareDialog({ item, onClose }: { item: DriveItem; onClose: 
       toast.success(nextUrl ? "Public link created" : "Public link revoked");
     },
   });
+  const [copied, setCopied] = useState(false);
+  const [showQr, setShowQr] = useState(false);
   async function copyLink() {
     if (!url) return;
     try {
       await navigator.clipboard.writeText(url);
-      toast.success("Link copied");
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
     } catch {
-      toast.error("Could not copy the link. Select the link below and copy it manually.");
+      toast.error("Could not copy the link. Select the link and copy it manually.");
     }
   }
   return <Dialog open onOpenChange={(open) => { if (!open && !mutation.isPending) onClose(); }}>
-    <DialogContent className="sm:max-w-md" showCloseButton={!mutation.isPending}>
+    <DialogContent className="gap-5 sm:max-w-md" showCloseButton={!mutation.isPending}>
       <DialogHeader>
         <DialogTitle>Share file</DialogTitle>
-        <DialogDescription className="break-all">{item.name}</DialogDescription>
+        <DialogDescription className="truncate" title={item.name}>{item.name}</DialogDescription>
       </DialogHeader>
-      <div className="flex items-center gap-3 py-2">
-        <span className="flex size-11 shrink-0 items-center justify-center rounded-full bg-muted">{url ? <Globe2 className="size-5 text-primary" /> : <LockKeyhole className="size-5 text-muted-foreground" />}</span>
-        <div><p className="text-sm font-medium">{url ? "Anyone with the link" : "Only your family"}</p><p className="mt-1 text-xs leading-relaxed text-muted-foreground">{url ? "People outside your family can view and download this file. No sign-in needed." : "Only verified @orole.be family members can access this file."}</p></div>
+      <div className="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 p-3">
+        <span className={cn("flex size-9 shrink-0 items-center justify-center rounded-lg", url ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground")}>{url ? <Globe2 className="size-4" /> : <LockKeyhole className="size-4" />}</span>
+        <div className="min-w-0">
+          <p className="text-sm font-medium">{url ? "Anyone with the link" : "Family only"}</p>
+          <p className="text-xs text-muted-foreground">{url ? "Can view and download without signing in." : item.isProtected ? "Files in a protected folder can’t be shared publicly." : "Only verified family members can open this file."}</p>
+        </div>
       </div>
-      {url ? <FieldGroup><Field>
-        <FieldLabel htmlFor="public-file-link">Public link</FieldLabel>
-        <div className="flex gap-2"><Input id="public-file-link" value={url} readOnly onFocus={(event) => event.target.select()} /><Button variant="outline" size="icon" onClick={copyLink} aria-label="Copy public link"><Copy /></Button></div>
-      </Field></FieldGroup> : <p className="text-sm leading-relaxed text-muted-foreground">Create a public link to share this file outside your family. Your verified email will appear on the public page. You can revoke access here at any time.</p>}
-      {url && <p className="text-xs leading-relaxed text-muted-foreground">Revoking blocks new visits immediately. Downloads already opened may remain available for up to one minute. Copies already downloaded cannot be recalled.</p>}
+      {url && <div className="flex flex-col gap-2">
+        <div className="flex gap-2">
+          <Input id="public-file-link" aria-label="Public link" value={url} readOnly onFocus={(event) => event.target.select()} className="font-mono text-xs" />
+          <Button onClick={copyLink} className="w-24 shrink-0">{copied ? <Check data-icon="inline-start" /> : <Copy data-icon="inline-start" />}{copied ? "Copied" : "Copy"}</Button>
+        </div>
+        <Button variant="ghost" size="sm" className="self-start text-muted-foreground" aria-expanded={showQr} onClick={() => setShowQr((open) => !open)}>
+          <QrCode data-icon="inline-start" />{showQr ? "Hide QR code" : "Show QR code"}
+        </Button>
+        {showQr && <ShareQr url={url} />}
+      </div>}
+      {!url && !item.isProtected && <p className="text-xs text-muted-foreground">Your verified email appears on the public page. You can revoke the link at any time.</p>}
       {mutation.error && <p role="alert" className="text-sm text-destructive">{mutation.error.message}</p>}
-      <DialogFooter>
+      <DialogFooter className="sm:justify-between">
+        {url
+          ? <Button variant="destructive" disabled={mutation.isPending} onClick={() => mutation.mutate(false)} title="Stops new visits immediately. Copies already downloaded can’t be recalled.">{mutation.isPending ? <Spinner /> : <Link2Off data-icon="inline-start" />}Revoke link</Button>
+          : <Button disabled={mutation.isPending || item.isProtected} onClick={() => mutation.mutate(true)}>{mutation.isPending ? <Spinner /> : <Link2 data-icon="inline-start" />}Create public link</Button>}
         <Button variant="outline" onClick={onClose} disabled={mutation.isPending}>Done</Button>
-        <Button variant={url ? "destructive" : "default"} disabled={mutation.isPending} onClick={() => mutation.mutate(!url)}>{mutation.isPending ? <Spinner /> : <Link2 data-icon="inline-start" />}{url ? "Revoke link" : "Create public link"}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>;
@@ -150,18 +144,18 @@ export function DriveShareDialog({ item, onClose }: { item: DriveItem; onClose: 
 
 export function DrivePreviewDialog({ item, onClose }: { item: DriveItem; onClose: () => void }) {
   const download = useDriveDownload();
+  const { run } = useFolderAccess();
   const [mediaError, setMediaError] = useState(false);
   const playback = useRef({ time: 0, paused: true });
-  const mime = item.mimeType ?? "";
-  const supported = mime.startsWith("image/") || mime.startsWith("video/") || mime.startsWith("audio/") || mime === "application/pdf";
+  const kind = getPreviewKind(item);
   const preview = useQuery({
-    queryKey: ["drive-preview", item.id],
-    queryFn: async () => {
-      const result = await getPreviewUrl(item.id);
-      if (!result.success) throw new Error(result.error);
-      return result.data.url;
+    queryKey: ["drive-preview", item.id, item.name],
+    queryFn: async ({ signal }) => {
+      const result = await run(() => getPreviewUrl(item.id));
+      signal.throwIfAborted();
+      return result.url;
     },
-    enabled: supported,
+    enabled: kind !== null,
     gcTime: 0,
     refetchOnWindowFocus: false,
     retry: false,
@@ -183,13 +177,14 @@ export function DrivePreviewDialog({ item, onClose }: { item: DriveItem; onClose
         <DialogDescription>{fileType(item)} · {formatBytes(item.size)}</DialogDescription>
       </DialogHeader>
       <div className="flex min-h-64 items-center justify-center overflow-hidden rounded-xl bg-muted/50">
-        {supported && preview.isPending ? <div className="flex items-center gap-2 py-24 text-sm text-muted-foreground"><Spinner />Loading preview…</div>
+        {kind && preview.isPending ? <div role="status" className="flex items-center gap-2 py-24 text-sm text-muted-foreground"><Spinner />Loading preview…</div>
           : preview.error ? <Alert variant="destructive" className="m-6"><TriangleAlert /><AlertTitle>Preview could not load</AlertTitle><AlertDescription>{preview.error.message}<Button variant="outline" size="sm" onClick={() => void preview.refetch()}>Try again</Button></AlertDescription></Alert>
-          : !url || !supported || mediaError ? <div className="flex flex-col items-center gap-2 px-6 py-12 text-center"><DriveFileIcon item={item} large /><p className="mt-3 text-sm font-medium">{mediaError ? "This preview could not be displayed" : "No preview for this file type"}</p><p className="text-sm text-muted-foreground">Download the file to open it on your device.</p>{mediaError && <Button variant="outline" size="sm" disabled={preview.isFetching} onClick={async () => { const refreshed = await preview.refetch(); if (refreshed.isSuccess) setMediaError(false); }}>{preview.isFetching && <Spinner />}Reload preview</Button>}</div>
-          : mime.startsWith("image/") ? <Image src={url} alt={item.name} width={1200} height={800} unoptimized className="max-h-[60dvh] w-auto max-w-full object-contain" onError={() => setMediaError(true)} />
-          : mime.startsWith("video/") ? <video src={url} controls playsInline preload="metadata" className="max-h-[60dvh] w-full" aria-label={item.name} onError={rememberPlayback} onLoadedMetadata={restorePlayback} onPlay={() => { playback.current.paused = false; }} onPause={(event) => { if (!event.currentTarget.error) playback.current.paused = true; }} />
-          : mime.startsWith("audio/") ? <div className="flex w-full flex-col items-center gap-8 p-8"><DriveFileIcon item={item} large /><audio src={url} controls preload="metadata" className="w-full" aria-label={item.name} onError={rememberPlayback} onLoadedMetadata={restorePlayback} onPlay={() => { playback.current.paused = false; }} onPause={(event) => { if (!event.currentTarget.error) playback.current.paused = true; }} /></div>
-          : <PdfPreview url={url} name={item.name} onError={() => setMediaError(true)} />}
+          : !url || !kind || mediaError ? <div className="flex flex-col items-center gap-2 px-6 py-12 text-center"><DriveFileIcon item={item} large /><p className="mt-3 text-sm font-medium">{mediaError ? "This preview could not be displayed" : "No preview for this file type"}</p><p className="text-sm text-muted-foreground">Download the file to open it on your device.</p>{mediaError && <Button variant="outline" size="sm" disabled={preview.isFetching} onClick={async () => { const refreshed = await preview.refetch(); if (refreshed.isSuccess) setMediaError(false); }}>{preview.isFetching && <Spinner />}Reload preview</Button>}</div>
+          : kind === "text" ? <TextPreview key={preview.dataUpdatedAt} url={url} name={item.name} size={item.size} onReload={() => { void preview.refetch(); }} isReloading={preview.isFetching} />
+          : kind === "image" ? <Image src={url} alt={item.name} width={1200} height={800} unoptimized className="max-h-[60dvh] w-auto max-w-full object-contain" onError={() => setMediaError(true)} />
+          : kind === "video" ? <video src={url} controls playsInline preload="metadata" className="max-h-[60dvh] w-full" aria-label={item.name} onError={rememberPlayback} onLoadedMetadata={restorePlayback} onPlay={() => { playback.current.paused = false; }} onPause={(event) => { if (!event.currentTarget.error) playback.current.paused = true; }} />
+          : kind === "audio" ? <div className="flex w-full flex-col items-center gap-8 p-8"><DriveFileIcon item={item} large /><audio src={url} controls preload="metadata" className="w-full" aria-label={item.name} onError={rememberPlayback} onLoadedMetadata={restorePlayback} onPlay={() => { playback.current.paused = false; }} onPause={(event) => { if (!event.currentTarget.error) playback.current.paused = true; }} /></div>
+          : kind === "pdf" ? <PdfPreview url={url} name={item.name} onError={() => setMediaError(true)} /> : null}
       </div>
       <DialogFooter>
         <Button variant="outline" onClick={onClose}>Close</Button>

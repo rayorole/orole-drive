@@ -12,7 +12,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { Input } from "@/components/ui/input";
 import { OtpInput } from "@/components/ui/otp-input";
 
-export function LoginForm() {
+export function LoginForm({ oauthQuery = "" }: { oauthQuery?: string }) {
   const router = useRouter();
   const [step, setStep] = useState<"email" | "code">("email");
   const [email, setEmail] = useState("");
@@ -77,14 +77,17 @@ export function LoginForm() {
     setOperation("verify");
     startTransition(async () => {
       try {
-        const result = await verifyCode(email, code);
+        const result = await verifyCode(email, code, oauthQuery);
         if (!result.success) {
           setError(result.error);
           return;
         }
         setVerified(true);
-        router.replace("/");
-        router.refresh();
+        if (result.data.redirectUrl) window.location.assign(result.data.redirectUrl);
+        else {
+          router.replace("/");
+          router.refresh();
+        }
       } catch {
         setError("We couldn't connect. Check your connection and try again.");
       }
@@ -159,7 +162,7 @@ export function LoginForm() {
               </Alert>
             )}
             <Button type="submit" size="lg" disabled={pending || (step === "code" && code.length !== 6)} className="h-12 w-full">
-              {pending ? <><span aria-hidden="true" className="inline-flex items-center justify-center"><Spinner /></span>{operation === "send" ? "Sending code…" : "Signing in…"}</> : <>{step === "email" ? "Send sign-in code" : "Open my drive"}<ArrowRight data-icon="inline-end" aria-hidden="true" /></>}
+              {pending ? <><span aria-hidden="true" className="inline-flex items-center justify-center"><Spinner /></span>{operation === "send" ? "Sending code…" : "Signing in…"}</> : <>{step === "email" ? "Send sign-in code" : oauthQuery ? "Continue to authorization" : "Open my drive"}<ArrowRight data-icon="inline-end" aria-hidden="true" /></>}
             </Button>
           </FieldGroup>
         </form>

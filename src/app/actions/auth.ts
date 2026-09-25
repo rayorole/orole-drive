@@ -9,7 +9,7 @@ import { consumeAuthAttempt, getAuth } from "@/lib/auth";
 import { FamilyAuthError, normalizeFamilyEmail } from "@/lib/auth-policy";
 import type { ActionResult } from "@/lib/drive-types";
 
-function authError(error: unknown): ActionResult<void> {
+function authError(error: unknown): { success: false; error: string } {
   if (error instanceof FamilyAuthError) return { success: false, error: error.message };
   if (error instanceof APIError) {
     const code = error.body?.code;
@@ -42,7 +42,7 @@ export async function requestCode(rawEmail: string): Promise<ActionResult<void>>
   }
 }
 
-export async function verifyCode(rawEmail: string, rawCode: string): Promise<ActionResult<void>> {
+export async function verifyCode(rawEmail: string, rawCode: string, oauthQuery = ""): Promise<ActionResult<{ redirectUrl?: string }>> {
   const email = normalizeFamilyEmail(rawEmail);
   if (!email) return { success: false, error: "Use your @orole.be email address to sign in." };
   const code = typeof rawCode === "string" ? rawCode.trim() : "";
@@ -50,12 +50,27 @@ export async function verifyCode(rawEmail: string, rawCode: string): Promise<Act
   try {
     const auth = getAuth();
     await consumeAuthAttempt(email, "verify");
-    await auth.api.signInEmailOTP({
-      body: { email, otp: code, name: email.split("@")[0] },
-      headers: await headers(),
+    if (typeof oauthQuery !== "string" || oauthQuery.length > 16_384) throw new FamilyAuthError("This authorization request is invalid. Restart the assistant connection.");
+    const requestHeaders = new Headers(await headers());
+    requestHeaders.set("accept", "application/json");
+    // The provider validates the signed query before sign-in and resumes
+    // authorization in its post-login hook; never navigate to a caller's URL.
+    const body = { email, otp: code, name: email.split("@")[0], ...(oauthQuery ? { oauth_query: oauthQuery } : {}) };
+    const result: unknown = await auth.api.signInEmailOTP({
+      body, headers: requestHeaders, asResponse: false,
+      // OAuth's post-login authorize endpoint requires an HTTP request context,
+      // including when sign-in originates in a Next server action.
+      request: new Request(new URL("/api/auth/sign-in/email-otp", auth.options.baseURL as string), { method: "POST", headers: requestHeaders }),
     });
+    let redirectUrl: string | undefined;
+    if (oauthQuery) {
+      if (!result || typeof result !== "object" || !("url" in result) || typeof result.url !== "string") {
+        throw new FamilyAuthError("Sign-in succeeded, but authorization could not continue. Restart the assistant connection.");
+      }
+      redirectUrl = result.url;
+    }
     revalidatePath("/", "layout");
-    return { success: true, data: undefined };
+    return { success: true, data: { redirectUrl } };
   } catch (error) {
     return authError(error);
   }

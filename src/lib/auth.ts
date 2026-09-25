@@ -3,17 +3,22 @@ import "server-only";
 import { createHash, createHmac } from "node:crypto";
 import { cache } from "react";
 import { betterAuth } from "better-auth";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { getSessionCookie } from "better-auth/cookies";
 import { nextCookies } from "better-auth/next-js";
-import { emailOTP } from "better-auth/plugins";
+import { emailOTP, jwt } from "better-auth/plugins";
+import { cimd } from "@better-auth/cimd";
+import { fetchClientMetadataResource } from "@better-auth/cimd/node";
+import { mcp } from "@better-auth/mcp";
 import { lt, lte, or, sql } from "drizzle-orm";
 import { headers } from "next/headers";
 import { Resend } from "resend";
 import * as schema from "@/lib/auth-schema";
 import { FamilyAuthError, isVerifiedFamilyUser, normalizeFamilyEmail } from "@/lib/auth-policy";
 import { getDb } from "@/lib/db";
+import * as mcpSchema from "@/lib/mcp-schema";
+import { McpAuthError, resolveDriveActor } from "@/lib/mcp-auth";
 
 export { FamilyAuthError } from "@/lib/auth-policy";
 
@@ -30,13 +35,32 @@ export const getAuth = cache(() => {
   if (!baseURL) {
     throw new FamilyAuthError("Sign-in is not configured. Ask the drive administrator to set BETTER_AUTH_URL to this site's address.");
   }
+  const mcpResource = new URL("/api/mcp", baseURL).toString();
 
   return betterAuth({
     appName: "Orole Drive",
     baseURL,
     secret,
-    database: drizzleAdapter(getDb(), { provider: "pg", schema, transaction: true }),
+    database: drizzleAdapter(getDb(), { provider: "pg", schema: { ...schema, ...mcpSchema }, transaction: true }),
     emailAndPassword: { enabled: false },
+    disabledPaths: ["/token"],
+    hooks: {
+      before: createAuthMiddleware(async (ctx) => {
+        // Client registration capabilities are not a default authorization grant.
+        if (ctx.path === "/oauth2/authorize") {
+          const params = ctx.method === "POST" ? ctx.body : ctx.query;
+          if (params && !params.scope) params.scope = "mcp:read";
+        }
+        if (ctx.path === "/oauth2/token") {
+          // Require a resource-bound JWT on every exchange, including refresh;
+          // the provider's opaque-token path does not run access-token claims.
+          const resource = ctx.body?.resource;
+          if (resource !== mcpResource && !(Array.isArray(resource) && resource.length === 1 && resource[0] === mcpResource)) {
+            throw new APIError("BAD_REQUEST", { error: "invalid_target", error_description: `Use ${mcpResource} as the resource.` });
+          }
+        }
+      }),
+    },
     session: {
       expiresIn: 60 * 60 * 24 * 30,
       updateAge: 60 * 60 * 24,
@@ -114,6 +138,35 @@ export const getAuth = cache(() => {
           }
         },
       }),
+      jwt(),
+      mcp({
+        loginPage: "/login",
+        consentPage: "/mcp/consent",
+        resource: mcpResource,
+        scopes: ["openid", "profile", "offline_access", "mcp:read", "mcp:write", "mcp:share", "mcp:trash"],
+        grantTypes: ["authorization_code", "refresh_token"],
+        clientRegistrationDefaultScopes: ["mcp:read"],
+        clientRegistrationAllowedScopes: ["openid", "profile", "offline_access", "mcp:write", "mcp:share", "mcp:trash"],
+        clientRegistrationRequirePKCE: true,
+        allowPublicClientPrelogin: true,
+        refreshTokenReuseInterval: 0,
+        extensions: [{
+          claims: {
+            // The provider owns sid issuance. Unlike its default offline-access
+            // policy, this drive requires the original browser session to live.
+            async accessToken({ user, sessionId, scopes }) {
+              try {
+                await resolveDriveActor({ sub: user?.id, sid: sessionId, scope: scopes.join(" ") });
+              } catch (error) {
+                if (!(error instanceof McpAuthError)) throw error;
+                throw new APIError("BAD_REQUEST", { error: "invalid_grant", error_description: error.message });
+              }
+              return {};
+            },
+          },
+        }],
+      }),
+      cimd({ fetchClientMetadataResource, metadataProfile: "mcp-2026-07-28" }),
       nextCookies(),
     ],
   });

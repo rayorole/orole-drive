@@ -1,0 +1,1 @@
+ALTER TABLE "drive_virus_scans" ADD COLUMN "analysis_id" text;

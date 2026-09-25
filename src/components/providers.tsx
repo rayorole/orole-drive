@@ -6,6 +6,7 @@ import { ThemeProvider } from "next-themes";
 import { MotionConfig } from "motion/react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+import { SoundEffects } from "@/components/ui/sound";
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(() => new QueryClient({
@@ -15,7 +16,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
       <MotionConfig reducedMotion="user">
         <QueryClientProvider client={queryClient}>
-          <TooltipProvider delay={350}>{children}<Toaster closeButton /></TooltipProvider>
+          <SoundEffects><TooltipProvider>{children}<Toaster closeButton /></TooltipProvider></SoundEffects>
         </QueryClientProvider>
       </MotionConfig>
     </ThemeProvider>

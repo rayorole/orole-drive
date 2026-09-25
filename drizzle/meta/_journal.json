@@ -22,6 +22,27 @@
       "when": 1790287041746,
       "tag": "0002_brave_robbie_robertson",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1790292289650,
+      "tag": "0003_yielding_major_mapleleaf",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1790292497884,
+      "tag": "0004_easy_agent_zero",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1790294338940,
+      "tag": "0005_melodic_the_leader",
+      "breakpoints": true
     }
   ]
 }
