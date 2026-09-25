@@ -496,7 +496,7 @@ function DriveSidebar({
             {/* DiceBear generates this data URI client-side; Next image optimization cannot process it. */}
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src={profileAvatarUrl(user.name || user.email)}
+              src={profileAvatarUrl(user)}
               alt=""
               className="size-full"
             />

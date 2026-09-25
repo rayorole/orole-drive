@@ -322,10 +322,10 @@ function ActivityTime({ at, now }: { at: string; now: number }) {
 }
 
 function ActorAvatar({
-  name,
+  actor,
   className,
 }: {
-  name: string;
+  actor: { name: string; email: string | null };
   className?: string;
 }) {
   return (
@@ -338,7 +338,7 @@ function ActorAvatar({
     >
       {/* DiceBear generates this data URI client-side; Next image optimization cannot process it. */}
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={profileAvatarUrl(name)} alt="" className="size-full" />
+      <img src={profileAvatarUrl(actor)} alt="" className="size-full" />
     </span>
   );
 }
@@ -543,7 +543,7 @@ export function DriveActivityView({
                     key={event.id}
                     className="flex items-start gap-3 border-b border-border/50 py-3 last:border-b-0"
                   >
-                    <ActorAvatar name={event.actor.name} />
+                    <ActorAvatar actor={event.actor} />
                     <div className="min-w-0 flex-1 pt-1.5">
                       <p className="break-words text-sm leading-snug text-muted-foreground">
                         <ActivitySentence event={event} onOpen={onOpen} />
@@ -610,7 +610,7 @@ export function ItemActivity({ itemId }: { itemId: string }) {
           {activity.data.events.map((event) => (
             <li key={event.id} className="flex items-start gap-2 text-xs">
               <ActorAvatar
-                name={event.actor.name}
+                actor={event.actor}
                 className="size-5 text-[10px]"
               />
               <p className="min-w-0 flex-1 break-words leading-5 text-muted-foreground">

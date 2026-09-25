@@ -238,7 +238,7 @@ function OwnerAvatar({ item }: { item: DriveItem }) {
       {/* DiceBear generates this data URI client-side; Next image optimization cannot process it. */}
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
-        src={profileAvatarUrl(item.owner.email || item.owner.name)}
+        src={profileAvatarUrl(item.owner)}
         alt=""
         className="size-full"
       />
