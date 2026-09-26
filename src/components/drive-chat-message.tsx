@@ -2,8 +2,8 @@
 
 import { createContext, useContext, useEffect, useState } from "react";
 import { MessagePrimitive, useAuiState, type TextMessagePartComponent } from "@assistant-ui/react";
-import { BookOpenText, FileDiff, FolderOpen, FolderSearch, Scale, Search } from "lucide-react";
-import type { DriveChatCitation, DriveChatStep, DriveItem } from "@/lib/drive-types";
+import { Activity, BookOpenText, Calculator, CalendarClock, FileDiff, FilePlus, FolderOpen, FolderPlus, FolderSearch, FolderTree, Image, Move, Pencil, Save, Scale, Search, Table2 } from "lucide-react";
+import type { DriveChatAttachment, DriveChatCitation, DriveChatStep, DriveItem } from "@/lib/drive-types";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { CodeDiff } from "@/components/assistant-ui/elements/code-diff";
 import { ComparisonCard } from "@/components/assistant-ui/elements/comparison-card";
@@ -19,6 +19,10 @@ import { Sources } from "@/components/assistant-ui/elements/sources";
 import { ToolCall } from "@/components/assistant-ui/elements/tool-call";
 import { ToolError } from "@/components/assistant-ui/elements/tool-error";
 import { ToolTimeline, type TimelineStep } from "@/components/assistant-ui/elements/tool-timeline";
+import { ChatApprovalCard, ChatDataTable, ChatDriveTree, ChatImageCard } from "@/components/drive-chat-results";
+import { ChatAttachmentPreview } from "@/components/drive-chat-attachment";
+import type { OutgoingAttachment } from "@/components/drive-chat-composer";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 /** A message in the sheet: saved on the server, or the question and answer still streaming. */
@@ -29,10 +33,11 @@ export type ChatEntry = {
   createdAt: string;
   citations: DriveChatCitation[];
   steps: DriveChatStep[];
-  attachments: { name: string; size: number; kind: "image" | "text" | "archive" }[];
+  attachments: DriveChatAttachment[];
   feedback: "up" | "down" | null;
   status: "running" | "complete" | "error";
   error?: string;
+  persisted?: boolean;
   /** Names of members @mentioned in the question, for highlighting. */
   mentions?: string[];
 };
@@ -42,11 +47,17 @@ export type ChatMessageContext = {
   /** The newest assistant answer: the only one that can be regenerated. */
   lastAssistantId: string | null;
   running: boolean;
+  open: boolean;
   regeneratingId: string | null;
   searchHitId: string | null;
   onOpenItem: (item: DriveItem) => void;
   onRegenerate: () => void;
   onFeedback: (messageId: string, feedback: "up" | "down" | null) => void;
+  retainedAttachments: ReadonlyMap<string, OutgoingAttachment>;
+  savedAttachmentIds: ReadonlySet<string>;
+  onSaveAttachment: (attachmentId: string) => void;
+  onClearAttachment: (attachmentId: string) => void;
+  onApproval: (messageId: string, stepId: string, decision: "approve" | "cancel") => Promise<void>;
 };
 
 const MessageContext = createContext<ChatMessageContext | null>(null);
@@ -119,8 +130,16 @@ export function ChatUserMessage() {
       <UserBubble className="whitespace-pre-wrap break-words"><MentionText text={entry.content} mentions={entry.mentions ?? []} /></UserBubble>
       <MessageTime time={timeFormat.format(new Date(entry.createdAt))} />
     </div>
-    {entry.attachments.length > 0 && <div className="flex flex-wrap justify-end gap-2">
-      {entry.attachments.map((file) => <ComposerAttachmentChip key={file.name} attachment={{ name: file.name, meta: `${Math.max(1, Math.round(file.size / 1024))} KB`, state: "done", kind: file.kind }} />)}
+    {entry.attachments.length > 0 && <div className="flex flex-col items-end gap-2">
+      {entry.attachments.map((file, index) => {
+        const retained = file.id ? context.retainedAttachments.get(file.id) : undefined;
+        const saved = Boolean(file.id && context.savedAttachmentIds.has(file.id));
+        return <div key={file.id ?? `${file.name}-${index}`} className="flex max-w-full flex-col items-end gap-1">
+          <ComposerAttachmentChip attachment={{ name: file.name, meta: `${Math.max(1, Math.round(file.size / 1024))} KB`, state: "done", kind: file.kind }} />
+          {retained && <ChatAttachmentPreview file={retained} />}
+          {saved ? <span className="text-xs text-muted-foreground">Saved to Drive</span> : retained ? <div className="flex items-center gap-1"><Button size="xs" variant="ghost" disabled={context.running} onClick={() => context.onSaveAttachment(file.id!)}>Save to Drive…</Button><Button size="xs" variant="ghost" disabled={context.running} onClick={() => context.onClearAttachment(file.id!)}>Clear from memory</Button></div> : <p className="max-w-64 text-right text-xs leading-relaxed text-muted-foreground">Reattach to save. Original bytes are not stored in chat history.</p>}
+        </div>;
+      })}
     </div>}
   </MessagePrimitive.Root>;
 }
@@ -132,11 +151,24 @@ const STEP_VERBS: Record<DriveChatStep["tool"], { verb: string; active: string; 
   read_file_excerpt: { verb: "Read", active: "Reading", icon: BookOpenText },
   compare_versions: { verb: "Compared versions of", active: "Comparing versions of", icon: FileDiff },
   present_comparison: { verb: "Weighed", active: "Weighing", icon: Scale },
+  recent_uploads: { verb: "Found recent uploads", active: "Finding recent uploads", icon: CalendarClock },
+  drive_activity: { verb: "Checked activity", active: "Checking activity", icon: Activity },
+  show_drive_tree: { verb: "Mapped", active: "Mapping", icon: FolderTree },
+  read_document: { verb: "Read document", active: "Reading document", icon: BookOpenText },
+  read_spreadsheet: { verb: "Read spreadsheet", active: "Reading spreadsheet", icon: Table2 },
+  calculate_spreadsheet: { verb: "Calculated", active: "Calculating", icon: Calculator },
+  view_image: { verb: "Displayed image", active: "Loading image", icon: Image },
+  read_image: { verb: "Read image", active: "Reading image", icon: Image },
+  create_file: { verb: "Proposed file", active: "Preparing file", icon: FilePlus },
+  create_folder: { verb: "Proposed folder", active: "Preparing folder", icon: FolderPlus },
+  rename_item: { verb: "Proposed rename", active: "Preparing rename", icon: Pencil },
+  move_items: { verb: "Proposed move", active: "Preparing move", icon: Move },
+  save_attachment: { verb: "Proposed upload save", active: "Preparing upload save", icon: Save },
 };
 
 function stepsLabel(steps: DriveChatStep[]) {
   const searches = steps.filter((step) => step.tool === "search_drive").length;
-  const reads = steps.filter((step) => step.tool === "read_file_excerpt").length;
+  const reads = steps.filter((step) => ["read_file_excerpt", "read_document", "read_spreadsheet", "read_image"].includes(step.tool)).length;
   const parts = [
     searches && `searched ${searches === 1 ? "once" : `${searches} times`}`,
     steps.some((step) => step.tool === "list_drive_items") && "browsed folders",
@@ -144,6 +176,12 @@ function stepsLabel(steps: DriveChatStep[]) {
     reads && `read ${reads} ${reads === 1 ? "file" : "files"}`,
     steps.some((step) => step.tool === "compare_versions") && "compared versions",
     steps.some((step) => step.tool === "present_comparison") && "weighed options",
+    steps.some((step) => step.tool === "recent_uploads") && "checked recent uploads",
+    steps.some((step) => step.tool === "drive_activity") && "checked activity",
+    steps.some((step) => step.tool === "show_drive_tree") && "mapped folders",
+    steps.some((step) => step.tool === "calculate_spreadsheet") && "calculated spreadsheet data",
+    steps.some((step) => step.tool === "view_image") && "displayed images",
+    steps.some((step) => step.approval) && "prepared actions for review",
   ].filter(Boolean).join(", ");
   return parts ? parts[0].toUpperCase() + parts.slice(1) : "Worked";
 }
@@ -169,19 +207,29 @@ function Steps({ steps, running }: { steps: DriveChatStep[]; running: boolean })
 
 /** Where the sources live, as a small tree of their (readable) folders. */
 function sourceTree(citations: DriveChatCitation[]): FileTreeNode[] {
-  const nodes: FileTreeNode[] = [];
-  const seen = new Set<string>();
+  const nodes = new Map<string, FileTreeNode>();
+  const children = new Map<string, string[]>();
   for (const citation of citations) {
     if (!citation.item) continue;
     const folders = citation.path.length ? citation.path : ["My drive"];
+    let parent = "";
     folders.forEach((name, depth) => {
-      const path = folders.slice(0, depth + 1).join("/");
-      if (!seen.has(path)) { seen.add(path); nodes.push({ path, name, depth, kind: "folder" }); }
+      const path = JSON.stringify(folders.slice(0, depth + 1));
+      if (!nodes.has(path)) {
+        nodes.set(path, { path, name, depth, kind: "folder", disabled: true });
+        children.set(parent, [...children.get(parent) ?? [], path]);
+      }
+      parent = path;
     });
-    const path = `${folders.join("/")}/${citation.itemId}`;
-    if (!seen.has(path)) { seen.add(path); nodes.push({ path, name: citation.name, depth: folders.length, kind: citation.item.kind === "folder" ? "folder" : "file" }); }
+    if (!nodes.has(citation.itemId)) {
+      nodes.set(citation.itemId, { path: citation.itemId, name: citation.name, depth: folders.length, kind: citation.item.kind });
+      children.set(parent, [...children.get(parent) ?? [], citation.itemId]);
+    }
   }
-  return nodes;
+  const ordered: FileTreeNode[] = [];
+  const append = (parent: string) => { for (const id of children.get(parent) ?? []) { ordered.push(nodes.get(id)!); append(id); } };
+  append("");
+  return ordered;
 }
 
 /** Source cards represent items; citation numbers still identify individual passages. */
@@ -222,7 +270,7 @@ export function ChatAssistantMessage() {
   if (!entry) return null;
   const running = context.running && entry.status === "running";
   const failedSteps = entry.steps.filter((step) => step.status === "error");
-  const canRegenerate = entry.id === context.lastAssistantId && !context.running;
+  const canRegenerate = entry.id === context.lastAssistantId && !context.running && !entry.steps.some((step) => step.approval?.status === "executing" || step.approval?.status === "completed");
   const regenerating = context.regeneratingId === entry.id;
   const tree = sourceTree(entry.citations);
   return <MessagePrimitive.Root id={`chat-message-${entry.id}`} className={cn("rounded-2xl", context.searchHitId === entry.id && "ring-2 ring-amber-400/60 ring-offset-4 ring-offset-background")}>
@@ -234,6 +282,14 @@ export function ChatAssistantMessage() {
       {running && !entry.steps.some((step) => step.status === "running") && <GenerationLoader label={entry.content.trim() ? "Writing" : "Thinking"} />}
       {entry.steps.flatMap((step) => step.comparison ? [<ComparisonCard key={step.id} {...step.comparison} className="max-w-none" />] : [])}
       {entry.steps.flatMap((step) => step.diff && step.diff.lines.length ? [<CodeDiff key={step.id} filename={step.diff.filename} additions={step.diff.additions} deletions={step.diff.deletions} lines={step.diff.lines} cycle={0} className="max-w-none" />] : [])}
+      {entry.steps.map((step) => <div key={step.id} className="contents">
+        {step.tree && <ChatDriveTree tree={step.tree} onOpen={context.onOpenItem} />}
+        {step.table && <ChatDataTable table={step.table} />}
+        {step.asset && context.open && (step.asset.item === null ? <p className="text-xs text-muted-foreground">This image is no longer available.</p> : <ChatImageCard asset={step.asset} onOpen={context.onOpenItem} />)}
+        {step.approval && <ChatApprovalCard approval={step.approval} persisted={Boolean(entry.persisted)} running={context.running}
+          attachment={step.approval.request.operation === "save_attachment" ? context.retainedAttachments.get(step.approval.request.attachmentId) : undefined}
+          onDecide={(decision) => context.onApproval(entry.id, step.id, decision)} />}
+      </div>)}
       {entry.status === "error" && <ErrorState title="The answer didn't finish" detail={entry.error ?? "Please try again."} retrying={regenerating} onRetry={canRegenerate ? context.onRegenerate : () => {}} className="max-w-none" />}
       {entry.citations.length > 0 && <Sources open={sourcesOpen} onOpenChange={setSourcesOpen} className="max-w-none"
         sources={groupCitations(entry.citations).map((citations) => {
@@ -256,7 +312,7 @@ export function ChatAssistantMessage() {
         className={cn(details && "opacity-100!", !canRegenerate && "[&_[aria-label='Regenerate response']]:hidden")} />}
       {details && <div className="flex w-full flex-col gap-2">
         <DocumentReferences citations={entry.citations} onOpen={context.onOpenItem} />
-        {tree.length > 0 && <FileTree nodes={tree} visibleCount={tree.length} totalAdditions={0} totalDeletions={0} title="Where the sources are" className="max-w-none" />}
+        {tree.length > 0 && !entry.steps.some((step) => step.tree) && <FileTree nodes={tree} title="Where the sources are" onOpen={(node) => { const item = entry.citations.find((citation) => citation.itemId === node.path)?.item; if (item) context.onOpenItem(item); }} className="max-w-none" />}
         {!tree.length && !entry.citations.some((citation) => citation.quote) && <p className="text-xs text-foreground/40">No sources you can open for this answer.</p>}
       </div>}
     </AssistantReply>

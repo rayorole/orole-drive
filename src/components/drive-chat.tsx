@@ -6,15 +6,17 @@ import { AssistantRuntimeProvider, ThreadPrimitive, useAuiState, useExternalStor
 import { ChevronDown, Ellipsis, Maximize2, Minimize2, Pencil, Plus, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import { deleteChat, renameChat, setChatFeedback } from "@/app/actions/chat";
+import { approveChatAction } from "@/app/actions/chat-mutations";
 import { getChat, listChats } from "@/lib/drive-read-client";
-import type { ChatStreamEvent, DriveChatStep, DriveItem } from "@/lib/drive-types";
+import { invalidateDriveMetadata } from "@/lib/drive-cache";
+import type { ChatStreamEvent, DriveChat, DriveChatStep, DriveItem } from "@/lib/drive-types";
 import { ConversationSearch, type SearchHit } from "@/components/assistant-ui/elements/conversation-search";
 import { EmptyState, EmptyStateGreeting, EmptyStateSuggestion, EmptyStateSuggestions } from "@/components/assistant-ui/elements/empty-state";
 import { PermissionGrant, type GrantScope } from "@/components/assistant-ui/elements/permission-grant";
 import { ghostButton } from "@/components/assistant-ui/elements/surfaces";
 import { ThreadSearch } from "@/components/assistant-ui/elements/thread-search";
 import { ChatAssistantMessage, ChatMessageProvider, ChatUserMessage, dayLabel, linkCitations, type ChatEntry, type ChatMessageContext } from "@/components/drive-chat-message";
-import { ChatComposer, type ComposerSubmission } from "@/components/drive-chat-composer";
+import { ChatComposer, type ComposerSubmission, type OutgoingAttachment } from "@/components/drive-chat-composer";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -154,6 +156,8 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
   const [renaming, setRenaming] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [opening, setOpening] = useState<DriveItem | null>(null);
+  const [retainedAttachments, setRetainedAttachments] = useState<ReadonlyMap<string, OutgoingAttachment>>(() => new Map());
+  const [composerKey, setComposerKey] = useState(0);
   const abort = useRef<AbortController | null>(null);
   useEffect(() => () => abort.current?.abort(), []);
 
@@ -179,7 +183,7 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
   });
 
   const messages = useMemo<ChatEntry[]>(() => {
-    const saved: ChatEntry[] = (chatId ? chat.data?.messages ?? [] : []).map((message) => ({ ...message, feedback: feedback[message.id] !== undefined ? feedback[message.id] : message.feedback, status: "complete" }));
+    const saved: ChatEntry[] = (chatId ? chat.data?.messages ?? [] : []).map((message) => ({ ...message, feedback: feedback[message.id] !== undefined ? feedback[message.id] : message.feedback, status: "complete", persisted: true }));
     const drafts = new Set((pending ?? []).map((entry) => entry.id));
     return [...saved.filter((entry) => !drafts.has(entry.id) && entry.id !== hiddenId), ...(pending ?? [])];
   }, [chatId, chat.data, pending, hiddenId, feedback]);
@@ -195,6 +199,7 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
     setRunning(false);
     setChatId(id);
     setHistoryOpen(false);
+    setComposerKey((key) => key + 1);
     search.hide();
   }
 
@@ -208,7 +213,7 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
     let target = chatId;
     let failed = false;
     try {
-      await streamAnswer({ ...input, chatId, assistantMessageId: assistantId }, (event) => {
+      await streamAnswer({ ...input, chatId, assistantMessageId: assistantId, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }, (event) => {
         if (controller.signal.aborted || abort.current !== controller || failed) return;
         if (event.type === "chat") {
           target = event.chatId;
@@ -249,8 +254,13 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
     if (running || consent === "pending" || consent === "denied") return false;
     const userId = crypto.randomUUID();
     const assistantId = crypto.randomUUID();
-    void run({ message: text, userMessageId: userId, mentionIds: mentions.map((member) => member.id), attachments: attachments.map(({ name, mimeType, data }) => ({ name, mimeType, data })) }, [
-      { id: userId, role: "user", content: text, createdAt: new Date().toISOString(), citations: [], steps: [], attachments: attachments.map(({ name, size, kind }) => ({ name, size, kind })), feedback: null, status: "complete", mentions: mentions.map((member) => member.name) },
+    if (attachments.length) setRetainedAttachments((current) => {
+      const next = new Map(current);
+      for (const attachment of attachments) next.set(attachment.id, attachment);
+      return next;
+    });
+    void run({ message: text, userMessageId: userId, mentionIds: mentions.map((member) => member.id), attachments: attachments.map(({ id, name, mimeType, data }) => ({ id, name, mimeType, data })) }, [
+      { id: userId, role: "user", content: text, createdAt: new Date().toISOString(), citations: [], steps: [], attachments: attachments.map(({ id, name, size, kind, mimeType }) => ({ id, name, size, kind, mimeType })), feedback: null, status: "complete", mentions: mentions.map((member) => member.name) },
       draftAssistant(assistantId),
     ], assistantId);
     return true;
@@ -258,7 +268,7 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
 
   function regenerate() {
     const last = messages.findLast((entry) => entry.role === "assistant");
-    if (!chatId || running || !last) return;
+    if (!chatId || running || !last || last.steps.some((step) => step.approval?.status === "executing" || step.approval?.status === "completed")) return;
     const assistantId = crypto.randomUUID();
     setRegeneratingId(last.id);
     setHiddenId(last.id);
@@ -272,6 +282,32 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
     setRunning(false);
     setPending((current) => current && current.map((entry) => entry.status === "running" ? { ...entry, status: "error", error: "Stopped." } : entry));
   }
+  function clearAttachment(id: string) {
+    setRetainedAttachments((current) => { const next = new Map(current); next.delete(id); return next; });
+  }
+
+  async function decideApproval(messageId: string, stepId: string, decision: "approve" | "cancel") {
+    const message = messages.find((entry) => entry.id === messageId);
+    const proposal = message?.steps.find((step) => step.id === stepId)?.approval;
+    if (!chatId || running || !message?.persisted || !proposal || proposal.status !== "pending") throw new Error("Wait until the proposal has been saved, then try again.");
+    const targetChat = chatId;
+    const attachmentId = proposal.request.operation === "save_attachment" ? proposal.request.attachmentId : null;
+    const attachmentData = decision === "approve" && attachmentId ? retainedAttachments.get(attachmentId)?.data : undefined;
+    if (decision === "approve" && attachmentId && !attachmentData) throw new Error("Reattach the original file and ask to save it again. Its bytes are no longer in this tab.");
+    const result = await approveChatAction({ messageId, stepId, decision, ...(attachmentData ? { attachmentData } : {}) });
+    if (!result.success) {
+      void client.invalidateQueries({ queryKey: ["drive-chat", targetChat] });
+      throw new Error(result.error);
+    }
+    client.setQueryData<DriveChat>(["drive-chat", targetChat], (current) => current && ({ ...current, messages: current.messages.map((entry) => entry.id !== messageId ? entry : { ...entry, steps: entry.steps.map((step) => step.id === stepId ? { ...step, approval: result.data } : step) }) }));
+    if (result.data.status === "completed") {
+      if (attachmentId) clearAttachment(attachmentId);
+      if (proposal.request.operation === "rename_item") invalidateDriveMetadata(client, [proposal.request.itemId]);
+      else void client.invalidateQueries({ queryKey: ["drive"] });
+      void client.invalidateQueries({ queryKey: ["storage-usage"] });
+    }
+    void client.invalidateQueries({ queryKey: ["drive-chat", targetChat] });
+  }
 
   const runtime = useExternalStoreRuntime<ChatEntry>({
     messages, convertMessage, isRunning: running,
@@ -283,9 +319,17 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
   const context: ChatMessageContext = {
     byId: new Map(messages.map((entry) => [entry.id, entry])),
     lastAssistantId: messages.findLast((entry) => entry.role === "assistant")?.id ?? null,
-    running, regeneratingId, searchHitId: search.activeMessageId,
+    running, open, regeneratingId, searchHitId: search.activeMessageId,
     onOpenItem: (item) => { setOpening(item); onOpenChange(false); },
     onRegenerate: regenerate,
+    retainedAttachments,
+    savedAttachmentIds: new Set(messages.flatMap((message) => message.steps.flatMap((step) => step.approval?.status === "completed" && step.approval.request.operation === "save_attachment" ? [step.approval.request.attachmentId] : []))),
+    onSaveAttachment: (id) => {
+      const attachment = retainedAttachments.get(id);
+      if (attachment) send({ text: `Please propose saving “${attachment.name}” to My drive, keeping its original contents.`, mentions: [], attachments: [attachment] });
+    },
+    onClearAttachment: clearAttachment,
+    onApproval: decideApproval,
     onFeedback: (messageId, value) => {
       setFeedback((current) => ({ ...current, [messageId]: value }));
       void setChatFeedback({ messageId, feedback: value }).then((result) => {
@@ -302,6 +346,7 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
     const result = await deleteChat(chatId);
     if (!result.success) toast.error(result.error);
     else {
+      for (const message of messages) for (const attachment of message.attachments) if (attachment.id) clearAttachment(attachment.id);
       client.removeQueries({ queryKey: ["drive-chat", chatId] });
       switchTo(null);
       await client.invalidateQueries({ queryKey: ["drive-chats"] });
@@ -354,6 +399,7 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
               <DropdownMenuGroup>
                 <DropdownMenuItem onClick={() => setRenaming(title)}><Pencil />Rename</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => search.show()}>Find in chat<span className="ms-auto text-xs text-muted-foreground">Ctrl F</span></DropdownMenuItem>
+                {retainedAttachments.size > 0 && <DropdownMenuItem onClick={() => setRetainedAttachments(new Map())}>Clear unsaved uploads from memory</DropdownMenuItem>}
               </DropdownMenuGroup>
               <DropdownMenuSeparator />
               <DropdownMenuGroup>
@@ -377,8 +423,8 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
           <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
             <ThreadPrimitive.Viewport className="relative flex min-h-0 flex-1 flex-col overflow-y-auto px-4 pt-4">
               {blocked ? <div className="m-auto flex w-full max-w-sm flex-col items-center gap-3 py-8">
-                <PermissionGrant className="max-w-none" capability="Search and read your files for answers" requester="Ask AI" scope={consent === "denied" ? "denied" : "pending"}
-                  reach={["Passages from files you can open are sent to Anthropic through OpenRouter", "Password-protected and excluded folders are never included", "Your chats are saved for you only, until you delete them"]}
+                <PermissionGrant className="max-w-none" capability="Search, read and organize your files" requester="Ask AI" scope={consent === "denied" ? "denied" : "pending"}
+                  reach={["File passages and attached images are sent to the configured AI models through OpenRouter", "Password-protected and excluded folders are never included", "Creating, renaming, moving and saving files always requires your approval", "Your chats are private; unsaved upload bytes stay only in this tab"]}
                   onGrant={consent === "pending" ? writeConsent : undefined} />
                 {consent === "denied" && <Button variant="ghost" size="sm" onClick={() => writeConsent("pending")}>Review this choice</Button>}
               </div> : empty ? <EmptyState className="m-auto max-w-none py-8">
@@ -393,8 +439,9 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
               </div>}
               <ThreadPrimitive.ViewportFooter className="sticky bottom-0 mt-auto bg-popover pb-3">
                 <div className="mx-auto w-full max-w-3xl">
-                  <ChatComposer running={running} disabled={blocked} onSubmit={send} onStop={stop}
+                  <ChatComposer key={composerKey} running={running} disabled={blocked} onSubmit={send} onStop={stop}
                     placeholder={blocked ? "Allow Ask AI to read your files first" : "Ask about your files, or @ to mention a member"} />
+                  {retainedAttachments.size > 0 && <p className="px-2 pt-2 text-center text-[11px] leading-relaxed text-muted-foreground">Unsaved uploads stay in memory until saved or cleared. After a reload, reattach them to save.</p>}
                 </div>
               </ThreadPrimitive.ViewportFooter>
             </ThreadPrimitive.Viewport>

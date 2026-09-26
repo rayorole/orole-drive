@@ -65,7 +65,7 @@ export type DriveChatSummary = { id: string; title: string; updatedAt: string; p
  * `quote` and `path` are only present while `item` is.
  */
 export type DriveChatCitation = { n: number; itemId: string; name: string; location: string | null; quote: string | null; path: string[]; item: DriveItem | null };
-export type DriveChatAttachment = { name: string; size: number; kind: "image" | "text" | "archive" };
+export type DriveChatAttachment = { id?: string; name: string; size: number; kind: "image" | "text" | "archive"; mimeType?: string; sha256?: string };
 export type DriveChatDiffLine = { kind: "context" | "added" | "removed"; text: string };
 export type DriveChatComparison = {
   traitLabels: string[];
@@ -73,7 +73,31 @@ export type DriveChatComparison = {
   recommendedId: string;
   reason: string;
 };
-export type DriveChatToolName = "list_drive_items" | "find_drive_items" | "search_drive" | "read_file_excerpt" | "compare_versions" | "present_comparison";
+export type DriveChatToolName = "list_drive_items" | "find_drive_items" | "search_drive" | "read_file_excerpt" | "compare_versions" | "present_comparison"
+  | "recent_uploads" | "drive_activity" | "show_drive_tree" | "read_document" | "read_spreadsheet" | "calculate_spreadsheet" | "view_image" | "read_image"
+  | "create_file" | "create_folder" | "rename_item" | "move_items" | "save_attachment";
+export type DriveChatTreeNode = { id: string; parentId: string | null; name: string; kind: "file" | "folder"; size: number; item?: DriveItem | null };
+export type DriveChatTree = { title: string; nodes: DriveChatTreeNode[]; hasMore: boolean; nextCursor?: string | null };
+export type DriveChatTable = { title: string; columns: string[]; rows: (string | number | null)[][]; truncated: boolean };
+export type DriveChatAsset = { itemId: string; alt: string; description?: string; ocr?: string; item?: DriveItem | null };
+export type DriveChatMutationRequest =
+  | { operation: "create_file"; name: string; parentId: string | null; content: string; mimeType: string }
+  | { operation: "save_attachment"; name: string; parentId: string | null; attachmentId: string; sha256: string; mimeType: string; size: number }
+  | { operation: "create_folder"; name: string; parentId: string | null }
+  | { operation: "rename_item"; itemId: string; name: string }
+  | { operation: "move_items"; itemIds: string[]; parentId: string | null };
+export type DriveChatApproval = {
+  request: DriveChatMutationRequest;
+  title: string;
+  details: string[];
+  status: "pending" | "executing" | "completed" | "cancelled" | "failed";
+  expiresAt: string;
+  snapshots: { itemId: string; updatedAt: string }[];
+  /** Files whose contents informed a generated file; all remain authorized until publication. */
+  sourceItemIds?: string[];
+  result?: { itemIds: string[]; names: string[] };
+  error?: string;
+};
 /**
  * One tool call in an answer. `label` is what the call was about (a query or a file name); `diff` holds
  * compared file lines and is dropped when the member can no longer open `itemId`.
@@ -86,8 +110,13 @@ export type DriveChatStep = {
   summary?: string;
   error?: string;
   itemId?: string;
+  sourceItemIds?: string[];
   diff?: { filename: string; additions: number; deletions: number; lines: DriveChatDiffLine[] };
   comparison?: DriveChatComparison;
+  tree?: DriveChatTree;
+  table?: DriveChatTable;
+  asset?: DriveChatAsset;
+  approval?: DriveChatApproval;
 };
 export type DriveChatMessage = {
   id: string; role: "user" | "assistant"; content: string; createdAt: string; citations: DriveChatCitation[];

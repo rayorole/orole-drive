@@ -1,7 +1,8 @@
 import "server-only";
 
-import { and, asc, eq, ilike, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, ilike, inArray, isNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
+import { chatDateRangeError, chatDateRangeFields, validChatDateRange } from "@/lib/chat-browse-input";
 import { discoverableRootsCondition, tryItemsAccess, visibleItemsCondition, withDriveTransaction } from "@/lib/drive-access";
 import type { DriveContext } from "@/lib/drive-access";
 import { DriveError } from "@/lib/drive-errors";
@@ -25,13 +26,21 @@ export const findChatItemsInput = z.object({
   query: z.string().trim().max(200).default("").describe("Case-insensitive part of a file or folder name. Empty with kind folder lists all accessible folders."),
 });
 
-type DiscoveryItem = { id: string; name: string; kind: "file" | "folder"; parentId: string | null; path: string[]; size: number; updatedAt: string };
+export const recentChatItemsInput = z.object({
+  ownerId: pageInput.ownerId,
+  limit: pageInput.limit,
+  cursor: pageInput.cursor,
+  ...chatDateRangeFields,
+}).refine(validChatDateRange, chatDateRangeError);
+
+type DiscoveryItem = { id: string; name: string; kind: "file" | "folder"; parentId: string | null; path: string[]; size: number; createdAt: string; updatedAt: string };
 export type ChatDiscoveryPage = { items: DiscoveryItem[]; folder: { id: string; name: string } | null; nextCursor: number | null };
 
 /** Metadata only: no embeddings, extraction, or index readiness is needed. Each page is freshly authorized. */
-export async function discoverChatItems(ctx: DriveContext, input: { mode: "list" | "find" } & z.input<typeof listChatItemsInput> & z.input<typeof findChatItemsInput>): Promise<ChatDiscoveryPage> {
-  const parsed = input.mode === "list" ? listChatItemsInput.parse(input) : findChatItemsInput.parse(input);
-  const { kind, ownerId, limit, cursor } = parsed;
+export async function discoverChatItems(ctx: DriveContext, input: { mode: "list" | "find" | "recent" } & z.input<typeof listChatItemsInput> & z.input<typeof findChatItemsInput> & z.input<typeof recentChatItemsInput>): Promise<ChatDiscoveryPage> {
+  const parsed = input.mode === "list" ? listChatItemsInput.parse(input) : input.mode === "recent" ? recentChatItemsInput.parse(input) : findChatItemsInput.parse(input);
+  const { ownerId, limit, cursor } = parsed;
+  const kind = "kind" in parsed ? parsed.kind : "file";
   const folderId = "folderId" in parsed ? parsed.folderId : null;
   const query = "query" in parsed ? parsed.query : "";
   return withDriveTransaction("read", async (tx) => {
@@ -46,10 +55,13 @@ export async function discoverChatItems(ctx: DriveContext, input: { mode: "list"
       folder = { id: row.id, name: row.name };
     }
     const conditions = [visibleItemsCondition(ctx), eq(driveItems.state, "complete"), isNull(driveItems.trashedAt), isNull(driveItems.deletionStartedAt)];
-    if (kind !== "all") conditions.push(eq(driveItems.kind, kind));
+    if (input.mode === "recent") conditions.push(eq(driveItems.kind, "file"));
+    else if (kind !== "all") conditions.push(eq(driveItems.kind, kind));
     if (ownerId) conditions.push(eq(driveItems.ownerId, ownerId));
     if (query) conditions.push(ilike(driveItems.name, `%${query.replace(/[\\%_]/g, "\\$&")}%`));
     if (input.mode === "list") conditions.push(folderId ? eq(driveItems.parentId, folderId) : discoverableRootsCondition(ctx));
+    if ("since" in parsed && parsed.since) conditions.push(gte(driveItems.createdAt, new Date(parsed.since)));
+    if ("until" in parsed && parsed.until) conditions.push(lt(driveItems.createdAt, new Date(parsed.until)));
     const items: DiscoveryItem[] = [];
     let offset = cursor;
     let nextCursor: number | null = null;
@@ -57,7 +69,7 @@ export async function discoverChatItems(ctx: DriveContext, input: { mode: "list"
     // Cursor advances over scanned rows, so an empty page with a cursor is not a claim of no matches.
     for (let batch = 0; batch < 5; batch++) {
       const rows = await tx.select().from(driveItems).where(and(...conditions))
-        .orderBy(asc(sql`lower(${driveItems.name})`), asc(driveItems.id)).limit(101).offset(offset);
+        .orderBy(...(input.mode === "recent" ? [desc(driveItems.createdAt), desc(driveItems.id)] : [asc(sql`lower(${driveItems.name})`), asc(driveItems.id)])).limit(101).offset(offset);
       const candidates = rows.slice(0, 100);
       const byId = new Map(candidates.map((row) => [row.id, row]));
       const ids = [...byId.keys()];
@@ -79,7 +91,7 @@ export async function discoverChatItems(ctx: DriveContext, input: { mode: "list"
           if (!name) break;
           path.unshift(name);
         }
-        items.push({ id: row.id, name: row.name, kind: row.kind, parentId: flags.parentId, path, size: row.size, updatedAt: row.updatedAt.toISOString() });
+        items.push({ id: row.id, name: row.name, kind: row.kind, parentId: flags.parentId, path, size: row.size, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() });
         if (items.length === limit) return { items, folder, nextCursor: index + 1 < rows.length ? offset : null };
       }
       nextCursor = rows.length > candidates.length ? offset : null;

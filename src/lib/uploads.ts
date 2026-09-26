@@ -19,6 +19,7 @@ import { destinationSiblings, findConflicts, type DestinationSibling } from "@/l
 import { assertQuota } from "@/lib/quota";
 import { cleanupUpload, commitUpload, createMultipartUpload, createObjectKey, ensureUploadWork, listUploadedParts, referencedObjectKeys, removeStagedObject, signUpload, toDriveItem } from "@/lib/storage";
 import { getDb } from "@/lib/db";
+import { assertMutationGuard, assertMutationGuardIdentity, completeMutationGuard, currentMutationGuardId } from "@/lib/drive-mutation-guard";
 import { enqueueSearch } from "@/lib/search-index";
 import { withStorageObjectLock } from "@/lib/storage-work";
 import { cancelTrashedUploads, trashRows } from "@/lib/trash";
@@ -82,6 +83,7 @@ async function pendingUpload(tx: DriveTransaction, ctx: DriveContext, id: string
   const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id));
   if (row) await ensureUploadWork(tx, row);
   const [work] = await tx.select().from(driveUploadWork).where(eq(driveUploadWork.id, id));
+  assertMutationGuardIdentity(work?.mutationGuardId ?? null);
   if (!row || row.kind !== "file" || row.state !== "pending" || row.trashedAt || row.deletionStartedAt ||
       !work || work.status !== "pending" || work.objectKey !== row.objectKey ||
       (ownOnly && row.createdBy !== ctx.userId) || row.createdAt.getTime() <= Date.now() - 86_400_000) {
@@ -126,6 +128,7 @@ export async function uploadTicket(ctx: DriveContext, id: string, resume = false
 export async function startUpload(ctx: DriveContext, request: UploadRequest): Promise<UploadTicket> {
   const { id, ticket, trashedUploadIds } = await withDriveTransaction("write", async (tx) => {
     await uploadDestination(tx, ctx, request.parentId);
+    await assertMutationGuard(tx, ctx, { operation: "upload", name: request.name, parentId: request.parentId, size: request.size, mimeType: request.mimeType });
     const siblings = await destinationSiblings(tx, ctx, request.parentId);
     const placement = await placeIncoming(tx, ctx, { key: request.key, name: request.name, kind: "file" }, request.parentId, siblings, request.resolution);
     await assertQuota(tx, ctx, request.size);
@@ -141,6 +144,7 @@ export async function startUpload(ctx: DriveContext, request: UploadRequest): Pr
       id, itemId: placement.replacesId ?? id, objectKey: key, size: request.size, mimeType: request.mimeType,
       createdAt: now, retainUntil: new Date(now.getTime() + 25 * 60 * 60 * 1000),
       multipart: request.size >= MULTIPART_THRESHOLD_BYTES,
+      mutationGuardId: currentMutationGuardId(),
     });
     // Presigning uses configured local credentials, not R2 I/O. Ordinary files
     // retain the one-transaction reservation fast path.
@@ -171,6 +175,7 @@ export async function finishUpload(ctx: DriveContext, id: string): Promise<Drive
     const [row] = await tx.select().from(driveItems).where(eq(driveItems.id, id));
     if (row) await ensureUploadWork(tx, row);
     const [work] = await tx.select().from(driveUploadWork).where(eq(driveUploadWork.id, id));
+    assertMutationGuardIdentity(work?.mutationGuardId ?? null);
     if (work?.status === "pending") {
       const referenced = await referencedObjectKeys(tx, [work.objectKey, ...(work.publicationKey ? [work.publicationKey] : [])]);
       if (referenced.size) await tx.update(driveUploadWork).set({ status: "published" }).where(eq(driveUploadWork.id, id));
@@ -188,6 +193,7 @@ export async function finishUpload(ctx: DriveContext, id: string): Promise<Drive
   const result = await withStorageObjectLock(identity.objectKey, async (confirmClaim): Promise<Completion> => {
     const snapshot = await withDriveTransaction("write", async (tx) => {
       const [work] = await tx.select().from(driveUploadWork).where(eq(driveUploadWork.id, id));
+      assertMutationGuardIdentity(work?.mutationGuardId ?? null);
       if (work?.status === "published") {
         const [file] = await tx.select().from(driveItems).where(eq(driveItems.id, work.itemId));
         if (!file || file.state !== "complete") throw new DriveError("This file is no longer available.");
@@ -209,6 +215,7 @@ export async function finishUpload(ctx: DriveContext, id: string): Promise<Drive
     const published = await withDriveTransaction("write", async (tx): Promise<Completion> => {
       const current = await pendingUpload(tx, ctx, id);
       if (current.objectKey !== row.objectKey || current.multipartUploadId !== row.multipartUploadId) throw new DriveError("This upload has changed. Please try again.");
+      await assertMutationGuard(tx, ctx, { operation: "upload", name: current.name, parentId: current.parentId, size: current.size, mimeType: current.mimeType!, pendingId: current.id });
       let completed: DriveRow;
       let replaced: ContentReplacement | null = null;
       if (current.replacesId) {
@@ -225,6 +232,7 @@ export async function finishUpload(ctx: DriveContext, id: string): Promise<Drive
         .onConflictDoUpdate({ target: [driveActivity.userId, driveActivity.itemId], set: { accessedAt: new Date() } });
       await recordEvents(tx, ctx, [{ action: replaced ? "new_version" : "upload", item: { id: completed.id, name: completed.name, kind: "file", parentId: completed.parentId },
         details: replaced ? { versionId: replaced.version.id, size: row.size } : { size: row.size } }]);
+      await completeMutationGuard(tx, ctx, { itemIds: [completed.id], names: [completed.name] });
       return { staged: row, item: await itemData(tx, ctx, completed), replaced };
     });
     // Staging remains retryable through a failed publication, and disappears only after commit.

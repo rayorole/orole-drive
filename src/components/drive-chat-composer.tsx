@@ -17,12 +17,11 @@ import { profileAvatarUrl } from "@/lib/profile-avatar";
 /** Keep in step with CHAT_ATTACHMENT_MAX_BYTES on the server (Vercel's request body limit). */
 const MAX_ATTACHMENT_BYTES = 3 * 1_048_576;
 const MAX_ATTACHMENTS = 3;
-const ACCEPT = ".txt,.md,.csv,.json,.pdf,.docx,.xlsx,.pptx,image/jpeg,image/png,image/gif,image/webp,text/*";
 
-export type OutgoingAttachment = { name: string; mimeType: string; data: string; size: number; kind: "image" | "text" | "archive" };
+export type OutgoingAttachment = { id: string; name: string; mimeType: string; data: string; size: number; kind: "image" | "text" | "archive" };
 export type ComposerSubmission = { text: string; mentions: { id: string; name: string }[]; attachments: OutgoingAttachment[] };
 
-type Staged = ComposerAttachment & { file?: OutgoingAttachment };
+type Staged = ComposerAttachment & { id: string; size: number; file?: OutgoingAttachment };
 
 function readBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -43,6 +42,7 @@ export function ChatComposer({ running, disabled, placeholder, onSubmit, onStop 
 }) {
   const [value, setValue] = useState("");
   const [staged, setStaged] = useState<Staged[]>([]);
+  const stagedRef = useRef<Staged[]>([]);
   const [picked, setPicked] = useState<{ id: string; name: string }[]>([]);
   const [activeMention, setActiveMention] = useState(0);
   const [expanded, setExpanded] = useState<string | undefined>("drive");
@@ -80,22 +80,28 @@ export function ChatComposer({ running, disabled, placeholder, onSubmit, onStop 
     setActiveMention(0);
   }
 
+  function updateStaged(change: (current: Staged[]) => Staged[]) {
+    stagedRef.current = change(stagedRef.current);
+    setStaged(stagedRef.current);
+  }
+
   async function addFiles(files: FileList | null) {
     for (const file of Array.from(files ?? [])) {
-      const used = staged.reduce((sum, entry) => sum + (entry.file?.size ?? 0), 0);
-      const kind = file.type.startsWith("image/") ? "image" as const : "text" as const;
+      const id = crypto.randomUUID();
+      const used = stagedRef.current.reduce((sum, entry) => sum + (entry.state === "error" ? 0 : entry.size), 0);
+      const kind = /^image\/(jpeg|png|gif|webp)$/i.test(file.type) ? "image" as const : file.type.startsWith("text/") || /\.(txt|md|csv|json|pdf|docx|xlsx|pptx)$/i.test(file.name) ? "text" as const : "archive" as const;
       const meta = `${Math.max(1, Math.round(file.size / 1024))} KB`;
-      if (staged.length >= MAX_ATTACHMENTS || used + file.size > MAX_ATTACHMENT_BYTES) {
-        setStaged((current) => [...current, { name: file.name, meta: "Over the 3 MB limit", state: "error", kind }]);
+      if (stagedRef.current.filter((entry) => entry.state !== "error").length >= MAX_ATTACHMENTS || used + file.size > MAX_ATTACHMENT_BYTES) {
+        updateStaged((current) => [...current, { id, size: file.size, name: file.name, meta: "Up to 3 files, 3 MB total", state: "error", kind }]);
         continue;
       }
-      setStaged((current) => [...current, { name: file.name, meta, state: "uploading", progress: 40, kind }]);
+      updateStaged((current) => [...current, { id, size: file.size, name: file.name, meta, state: "uploading", progress: 40, kind }]);
       try {
         const data = await readBase64(file);
-        setStaged((current) => current.map((entry) => entry.name === file.name && entry.state === "uploading"
-          ? { ...entry, state: "done", progress: 100, file: { name: file.name, mimeType: file.type || "application/octet-stream", data, size: file.size, kind } } : entry));
+        updateStaged((current) => current.map((entry) => entry.id === id
+          ? { ...entry, state: "done", progress: 100, file: { id, name: file.name, mimeType: file.type || "application/octet-stream", data, size: file.size, kind } } : entry));
       } catch {
-        setStaged((current) => current.map((entry) => entry.name === file.name && entry.state === "uploading" ? { ...entry, state: "error", meta: "Could not read" } : entry));
+        updateStaged((current) => current.map((entry) => entry.id === id ? { ...entry, state: "error", meta: "Could not read file" } : entry));
       }
     }
   }
@@ -107,12 +113,13 @@ export function ChatComposer({ running, disabled, placeholder, onSubmit, onStop 
     const attachments = staged.flatMap((entry) => entry.file ? [entry.file] : []);
     if (!onSubmit({ text, mentions, attachments })) return;
     setValue("");
-    setStaged([]);
+    updateStaged(() => []);
     setPicked([]);
   }
 
   const servers: McpServer[] = [
-    { id: "drive", name: "Orole Drive", transport: "built in · your access", status: "connected", tools: ["list_drive_items", "find_drive_items", "search_drive", "read_file_excerpt", "compare_versions", "present_comparison"] },
+    { id: "drive", name: "Orole Drive", transport: "built in · your access", status: "connected", tools: ["list_drive_items", "find_drive_items", "search_drive", "recent_uploads", "drive_activity", "show_drive_tree", "read_file_excerpt", "read_document", "read_spreadsheet", "calculate_spreadsheet", "view_image", "read_image", "compare_versions", "present_comparison"] },
+    { id: "actions", name: "Drive actions", transport: "review first · approval required", status: "connected", tools: ["create_file", "create_folder", "rename_item", "move_items", "save_attachment"] },
     { id: "index", name: "Semantic index", transport: "Cloudflare Workers AI + Vectorize", status: status.data ? (status.data.semanticIndex ? "connected" : "failed") : "connecting", tools: ["bge-m3 embeddings", "vector search", "keyword search"] },
     { id: "model", name: "Language model", transport: "OpenRouter", status: status.data ? (status.data.model ? "connected" : "failed") : "connecting", tools: status.data?.model ? [status.data.model] : [] },
   ];
@@ -126,8 +133,8 @@ export function ChatComposer({ running, disabled, placeholder, onSubmit, onStop 
       onDragOver={(event) => { if (!disabled) event.preventDefault(); }}
       onDrop={(event) => { if (disabled) return; event.preventDefault(); void addFiles(event.dataTransfer.files); }}>
       {staged.length > 0 && <ComposerAttachments className="px-1 pt-1">
-        {staged.map((file) => <ComposerAttachmentChip key={file.name} attachment={file}
-          onRemove={(name) => setStaged((current) => current.filter((entry) => entry.name !== name))} />)}
+        {staged.map((file) => <ComposerAttachmentChip key={file.id} attachment={file}
+          onRemove={() => updateStaged((current) => current.filter((entry) => entry.id !== file.id))} />)}
       </ComposerAttachments>}
       <ComposerInput value={value} disabled={disabled} placeholder={placeholder} aria-label="Ask a question about your files"
         onChange={(event) => { setValue(event.target.value); setActiveMention(0); }}
@@ -145,14 +152,14 @@ export function ChatComposer({ running, disabled, placeholder, onSubmit, onStop 
       <ComposerToolbar>
         <ComposerActions>
           <ComposerAttachButton aria-label="Attach files" onClick={disabled ? undefined : () => fileInput.current?.click()} />
-          <input ref={fileInput} type="file" multiple hidden accept={ACCEPT} onChange={(event) => { void addFiles(event.target.files); event.target.value = ""; }} />
+          <input ref={fileInput} type="file" multiple hidden onChange={(event) => { void addFiles(event.target.files); event.target.value = ""; }} />
         </ComposerActions>
         <ComposerActions>
           <Popover>
             <PopoverTrigger render={<button type="button" aria-label="What Ask AI can use" className={cn(ghostButton, "size-8")} />}>
               <SlidersHorizontal className="size-4" />
             </PopoverTrigger>
-            <PopoverContent side="top" align="end" className="w-80 rounded-2xl p-0">
+            <PopoverContent side="top" align="end" className="max-h-[70dvh] w-80 overflow-y-auto rounded-2xl p-0">
               <McpServerPanel servers={servers} expandedId={expanded} onToggle={(id) => setExpanded((current) => current === id ? undefined : id)} className="max-w-none border-0 bg-transparent dark:bg-transparent" />
             </PopoverContent>
           </Popover>

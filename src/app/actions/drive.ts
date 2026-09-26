@@ -32,6 +32,7 @@ import { planTransfer } from "@/lib/transfer-plan";
 import { idSchema, mimeSchema, nameSchema, parentSchema, uploadKeySchema, uploadResolutionSchema } from "@/lib/drive-input";
 import { cancelPendingUpload, finishUpload, startUpload } from "@/lib/uploads";
 import { enqueueSearch, enqueueSearchTree, removeFromSearch } from "@/lib/search-index";
+import { assertMutationGuard, completeMutationGuard } from "@/lib/drive-mutation-guard";
 
 /** Files assessed per listing in the background, so older files get risk scores without a batch job. */
 const RISK_BACKFILL_PER_LISTING = 10;
@@ -173,8 +174,10 @@ export async function createFolder(input: { name: string; parentId?: string | nu
     const { name, parentId } = z.object({ name: nameSchema, parentId: parentSchema }).parse(input);
     return withDriveTransaction("write", async (tx) => {
       await destination(tx, ctx, parentId, true);
+      await assertMutationGuard(tx, ctx, { operation: "create_folder", name, parentId });
       const [folder] = await tx.insert(driveItems).values({ id: randomUUID(), name, parentId, kind: "folder", state: "complete", size: 0, createdBy: ctx.userId, ...defaultItemAccess(ctx, parentId) }).returning();
       await recordEvents(tx, ctx, [{ action: "create_folder", item: { id: folder.id, name, kind: "folder", parentId } }]);
+      await completeMutationGuard(tx, ctx, { itemIds: [folder.id], names: [folder.name] });
       return itemData(tx, ctx, folder);
     });
   });
@@ -208,10 +211,12 @@ export async function renameItem(input: { id: string; name: string }): Promise<A
     const { id, name } = z.object({ id: idSchema, name: nameSchema }).parse(input);
     await withDriveTransaction("write", async (tx) => {
       const row = await requireItem(tx, ctx, id, "write");
+      await assertMutationGuard(tx, ctx, { operation: "rename_item", itemId: id, name });
       await tx.update(driveItems).set({ name, updatedAt: new Date() }).where(eq(driveItems.id, id));
       if (row.name !== name) await recordEvents(tx, ctx, [{ action: "rename", item: { id, name, kind: row.kind, parentId: row.parentId }, details: { fromName: row.name } }]);
       // A file's name leads its first passage; folder names are never embedded.
       if (row.name !== name && row.kind === "file") await enqueueSearch(tx, [id]);
+      await completeMutationGuard(tx, ctx, { itemIds: [id], names: [name] });
     });
   });
 }
@@ -240,6 +245,7 @@ export async function moveItems(input: { ids: string[]; parentId: string | null;
       await assertItemsAccess(tx, ctx, selected, { permission: "write" });
       const path = await destination(tx, ctx, parentId);
       assertMoveDepth(tree, path);
+      await assertMutationGuard(tx, ctx, { operation: "move_items", itemIds: ids, parentId });
       const plan = planTransfer(tree.roots, await destinationSiblings(tx, ctx, parentId), resolutions, "move", parentId);
       await assertReplaceable(tx, ctx, plan.replaceIds, tree);
       const pendingIds = plan.replaceIds.length ? await trashRows(tx, ctx, plan.replaceIds, { reason: "replaced" }) : [];
@@ -264,6 +270,7 @@ export async function moveItems(input: { ids: string[]; parentId: string | null;
         action: "move", item: { id: root.id, name, kind: root.kind, parentId },
         details: { fromParentId: root.parentId && fromNames.has(root.parentId) ? root.parentId : null, fromParentName: root.parentId ? fromNames.get(root.parentId) ?? null : null, toParentName, ...(name !== root.name ? { renamedFrom: root.name } : {}) },
       })));
+      await completeMutationGuard(tx, ctx, { itemIds: plan.items.map(({ root }) => root.id), names: plan.items.map(({ name }) => name) });
       return {
         result: {
           moved: plan.items.map(({ root }) => ({ id: root.id, fromParentId: root.parentId && fromNames.has(root.parentId) ? root.parentId : null })),

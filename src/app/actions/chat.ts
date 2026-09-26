@@ -4,6 +4,9 @@ import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { readableCitedItems } from "@/lib/chat";
 import { driveChatMessages, driveChats } from "@/lib/chat-schema";
+import { hydrateChatStep } from "@/lib/chat-hydration";
+import { chatStepItemIds } from "@/lib/chat-step-references";
+import { recoverExpiredChatApprovals } from "@/lib/chat-mutations";
 import { getDb } from "@/lib/db";
 import { driveAction } from "@/lib/drive-access";
 import { DriveError } from "@/lib/drive-errors";
@@ -35,20 +38,21 @@ export async function listChats(): Promise<ActionResult<DriveChatSummary[]>> {
 export async function getChat(id: string): Promise<ActionResult<DriveChat>> {
   return driveAction(async (ctx) => {
     const chatId = chatIdSchema.parse(id);
+    await recoverExpiredChatApprovals(ctx, chatId);
     const [chat] = await getDb().select({ id: driveChats.id, title: driveChats.title, updatedAt: driveChats.updatedAt, preview: lastQuestion }).from(driveChats)
       .where(and(eq(driveChats.id, chatId), eq(driveChats.userId, ctx.userId)));
     if (!chat) throw new DriveError("This chat is no longer available.");
     const messages = await getDb().select().from(driveChatMessages).where(eq(driveChatMessages.chatId, chat.id)).orderBy(asc(driveChatMessages.createdAt));
     const readable = await readableCitedItems(ctx, messages.flatMap((message) => [
       ...message.citations.map((citation) => citation.itemId),
-      ...message.steps.flatMap((step) => step.itemId ? [step.itemId] : []),
+      ...message.steps.flatMap(chatStepItemIds),
     ]));
     return {
       id: chat.id, title: chat.title, updatedAt: chat.updatedAt.toISOString(), preview: chat.preview.slice(0, 120),
       messages: messages.map((message) => ({
         id: message.id, role: message.role, content: message.content, createdAt: message.createdAt.toISOString(),
         attachments: message.attachments, feedback: message.feedback,
-        steps: message.steps.map((step) => step.itemId && !readable.has(step.itemId) ? { ...step, label: step.tool === "list_drive_items" ? "Unavailable folder" : "Unavailable file", diff: undefined } : step),
+        steps: message.steps.map((step) => hydrateChatStep(step, readable)),
         citations: message.citations.map((citation) => {
           const row = readable.get(citation.itemId);
           return row
@@ -83,8 +87,16 @@ export async function setChatFeedback(input: { messageId: string; feedback: "up"
 export async function deleteChat(id: string): Promise<ActionResult<void>> {
   return driveAction(async (ctx) => {
     const chatId = chatIdSchema.parse(id);
-    const deleted = await getDb().delete(driveChats).where(and(eq(driveChats.id, chatId), eq(driveChats.userId, ctx.userId))).returning({ id: driveChats.id });
-    if (!deleted.length) throw new DriveError("This chat is no longer available.");
+    await recoverExpiredChatApprovals(ctx, chatId);
+    await getDb().transaction(async (tx) => {
+      const [chat] = await tx.select({ id: driveChats.id }).from(driveChats).where(and(eq(driveChats.id, chatId), eq(driveChats.userId, ctx.userId))).for("update");
+      if (!chat) throw new DriveError("This chat is no longer available.");
+      const messages = await tx.select({ steps: driveChatMessages.steps }).from(driveChatMessages).where(eq(driveChatMessages.chatId, chatId));
+      if (messages.some((message) => message.steps.some((step) => step.approval?.status === "executing"))) {
+        throw new DriveError("A Drive action is still running. Wait for it to finish before deleting this chat.");
+      }
+      await tx.delete(driveChats).where(eq(driveChats.id, chatId));
+    });
   });
 }
 

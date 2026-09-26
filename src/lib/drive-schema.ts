@@ -108,6 +108,8 @@ export const driveUploadWork = pgTable("drive_upload_work", {
   objectKey: varchar("object_key", { length: 128 }).notNull().unique(),
   /** Single-PUT publication never writes the legacy final/staging identity. */
   publicationKey: varchar("publication_key", { length: 128 }).unique(),
+  /** Server-only approval identity; ordinary upload finalizers cannot publish guarded work. */
+  mutationGuardId: uuid("mutation_guard_id"),
   multipartUploadId: text("multipart_upload_id"),
   multipart: boolean("multipart").notNull().default(false),
   size: bigint("size", { mode: "number" }).notNull(),

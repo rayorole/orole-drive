@@ -10,6 +10,7 @@ import { startChatTurn } from "./chat";
 import { driveChatMessages, driveChats } from "./chat-schema";
 import type { Database } from "./db";
 import type { DriveContext } from "./drive-access";
+import { DriveError } from "./drive-errors";
 import { driveItems } from "./drive-schema";
 
 const signal = new AbortController().signal;
@@ -63,6 +64,43 @@ test("chats stay private and never resend text from sources the member lost", { 
       const turn = await startChatTurn(member, { message: "Wat heeft @Other gedeeld?", mentionIds: [otherId, "not-a-member"] }, signal);
       assert.deepEqual(turn.mentions.map((mention) => mention.id), [otherId]);
       assert.match(textOf(turn.history.at(-1)!.content), new RegExp(`ownerId ${otherId}`));
+    });
+
+    await t.test("structured spreadsheet results are not resent after source revocation", async () => {
+      await db.update(driveItems).set({ trashedAt: null }).where(eq(driveItems.id, fileId));
+      const { chatId } = await startChatTurn(member, { message: "Show the total." }, signal);
+      await db.insert(driveChatMessages).values({
+        id: randomUUID(), chatId, role: "assistant", content: "The total is in the table.",
+        steps: [{ id: randomUUID(), tool: "calculate_spreadsheet", status: "done", label: "Total", itemId: fileId, table: { title: "Salary", columns: ["Total"], rows: [[4271]], truncated: false } }],
+      });
+      const before = await startChatTurn(member, { chatId, message: "What is in that table?" }, signal);
+      assert.ok(before.history.some((message) => textOf(message.content).includes("4271")));
+      await db.update(driveItems).set({ trashedAt: new Date() }).where(eq(driveItems.id, fileId));
+      const after = await startChatTurn(member, { chatId, message: "Repeat the table." }, signal);
+      assert.ok(after.history.every((message) => !textOf(message.content).includes("4271")));
+    });
+
+    await t.test("regeneration cannot erase an action that was approved", async () => {
+      const { chatId } = await startChatTurn(member, { message: "Create Notes." }, signal);
+      const answerId = randomUUID();
+      await db.insert(driveChatMessages).values({
+        id: answerId, chatId, role: "assistant", content: "Folder creation approved.",
+        steps: [{ id: randomUUID(), tool: "create_folder", status: "done", label: "Notes", approval: {
+          request: { operation: "create_folder", name: "Notes", parentId: null }, title: "Create Notes", details: ["My drive"],
+          status: "completed", expiresAt: new Date(Date.now() + 60_000).toISOString(), snapshots: [], result: { itemIds: [], names: ["Notes"] },
+        } }],
+      });
+      await assert.rejects(startChatTurn(member, { chatId, regenerate: true }, signal), DriveError);
+      assert.deepEqual((await db.select({ id: driveChatMessages.id }).from(driveChatMessages).where(eq(driveChatMessages.id, answerId))).map((row) => row.id), [answerId]);
+    });
+
+    await t.test("later save requests retain attachment identity but not the original contents", async () => {
+      const id = randomUUID();
+      const first = await startChatTurn(member, { message: "Read this note.", attachments: [{ id, name: "note.txt", mimeType: "text/plain", data: Buffer.from("private original note text").toString("base64") }] }, signal);
+      const next = await startChatTurn(member, { chatId: first.chatId, message: "Save that attachment." }, signal);
+      assert.equal(next.attachments[0].id, id);
+      assert.equal(next.attachments[0].sha256, first.attachments[0].sha256);
+      assert.ok(next.history.every((message) => !textOf(message.content).includes("private original note text")));
     });
   } finally {
     databaseGlobal.oroleDatabase = previous;

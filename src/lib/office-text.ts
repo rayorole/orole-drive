@@ -11,7 +11,7 @@ import type { SearchSection } from "@/lib/search-chunk";
 
 const entities: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'" };
 
-function decodeXml(text: string): string {
+export function decodeXml(text: string): string {
   return text.replace(/&(?:#(\d{1,7})|#x([\da-f]{1,6})|(amp|lt|gt|quot|apos));/gi, (match, decimal: string, hex: string, name: string) => {
     if (name) return entities[name.toLowerCase()];
     const code = decimal ? Number(decimal) : parseInt(hex, 16);
@@ -20,7 +20,7 @@ function decodeXml(text: string): string {
 }
 
 /** Same data-only rule as the preview: no DTDs, entities or processing instructions. */
-function xmlText(parts: Map<string, Uint8Array>, path: string): string {
+export function xmlText(parts: Map<string, Uint8Array>, path: string): string {
   const bytes = parts.get(path);
   if (!bytes) throw new OfficePreviewError("A required document part is missing.");
   const encoding = bytes[0] === 0xff && bytes[1] === 0xfe ? "utf-16le" : bytes[0] === 0xfe && bytes[1] === 0xff ? "utf-16be" : "utf-8";
@@ -30,19 +30,20 @@ function xmlText(parts: Map<string, Uint8Array>, path: string): string {
 }
 
 /** Elements by local name, ignoring namespace prefixes. Office never nests these elements in themselves. */
-function elements(xml: string, name: string): { attributes: string; body: string }[] {
+export function elements(xml: string, name: string): { attributes: string; body: string }[] {
   const pattern = new RegExp(`<(?:[\\w.-]+:)?${name}(?=[\\s/>])([^>]*?)(?:/>|>([\\s\\S]*?)</(?:[\\w.-]+:)?${name}>)`, "g");
   return Array.from(xml.matchAll(pattern), (match) => ({ attributes: match[1], body: match[2] ?? "" }));
 }
 
-function attribute(attributes: string, name: string, prefixed = false): string | null {
-  const pattern = new RegExp(`\\s${prefixed ? "[\\w.-]+:" : ""}${name}="([^"]*)"`);
-  return pattern.exec(attributes)?.[1] ?? null;
+export function attribute(attributes: string, name: string, prefixed = false): string | null {
+  const pattern = new RegExp(`\\s${prefixed ? "[\\w.-]+:" : ""}${name}=(?:"([^"]*)"|'([^']*)')`);
+  const match = pattern.exec(attributes);
+  return match ? match[1] ?? match[2] : null;
 }
 
-const textRuns = (xml: string) => elements(xml, "t").map((run) => decodeXml(run.body)).join("");
+export const textRuns = (xml: string) => elements(xml, "t").map((run) => decodeXml(run.body)).join("");
 
-function relationships(parts: Map<string, Uint8Array>, source: string): Map<string, { target: string; type: string }> {
+export function relationships(parts: Map<string, Uint8Array>, source: string): Map<string, { target: string; type: string }> {
   const slash = source.lastIndexOf("/");
   const path = `${source.slice(0, slash + 1)}_rels/${source.slice(slash + 1)}.rels`;
   const links = new Map<string, { target: string; type: string }>();
@@ -112,15 +113,22 @@ function presentationText(parts: Map<string, Uint8Array>): SearchSection[] {
   });
 }
 
-/** Plain text sections of a docx/xlsx/pptx: one per worksheet or slide. Throws OfficePreviewError when unsafe or malformed. */
-export async function extractOfficeText(bytes: Uint8Array, kind: OfficeKind, signal: AbortSignal): Promise<SearchSection[]> {
+/** Shared server-side safety gate; no macros, active content or XML entity expansion. */
+export async function readSafeOfficeParts(bytes: Uint8Array, signal: AbortSignal) {
   const parts = await readOfficeArchive(bytes, signal);
   for (const [path] of parts) {
-    if (/vbaProject|activeX|macrosheets/i.test(path)) throw new OfficePreviewError("Macro-enabled Office files are not indexed.");
+    if (/vbaProject|activeX|macrosheets/i.test(path)) throw new OfficePreviewError("Macro-enabled Office files are not supported.");
+    if (/\.(?:xml|rels)$/i.test(path)) xmlText(parts, path);
   }
   if (elements(xmlText(parts, "[Content_Types].xml"), "Override").some((type) => /macroEnabled/i.test(attribute(type.attributes, "ContentType") ?? ""))) {
-    throw new OfficePreviewError("Macro-enabled Office files are not indexed.");
+    throw new OfficePreviewError("Macro-enabled Office files are not supported.");
   }
   signal.throwIfAborted();
+  return parts;
+}
+
+/** Plain text sections of a docx/xlsx/pptx: one per worksheet or slide. */
+export async function extractOfficeText(bytes: Uint8Array, kind: OfficeKind, signal: AbortSignal): Promise<SearchSection[]> {
+  const parts = await readSafeOfficeParts(bytes, signal);
   return kind === "docx" ? wordText(parts, signal) : kind === "xlsx" ? spreadsheetText(parts) : presentationText(parts);
 }

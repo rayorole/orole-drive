@@ -10,6 +10,8 @@ const nextConfig: NextConfig = {
     "./node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs",
   ]])),
   experimental: {
+    // A confirmed chat attachment is at most 3 MiB; base64 plus action framing stays below this cap.
+    serverActions: { bodySizeLimit: "4.5mb" },
     // HMR otherwise caches even no-store file streams in development.
     serverComponentsHmrCache: false,
   },

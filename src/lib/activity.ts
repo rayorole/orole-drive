@@ -4,6 +4,7 @@ import type { DriveContext } from "@/lib/drive-access";
 import type { DriveTransaction } from "@/lib/db";
 import { sql } from "drizzle-orm";
 import { DRIVE_EVENT_ACTIONS, driveEvents } from "@/lib/drive-schema";
+import type { DriveEventRow } from "@/lib/drive-schema";
 
 export type DriveEventAction = (typeof DRIVE_EVENT_ACTIONS)[number];
 export type DriveEventDetails = Record<string, string | number | boolean | null>;
@@ -17,6 +18,42 @@ export type NewDriveEvent = {
 
 /** Scheduled cleanup acts as this actor, so its deletions never pose as a member's. */
 export const SYSTEM_ACTOR = { userId: null, email: "Automatic cleanup" } as const;
+
+/** Historical links are untrusted snapshots, not proof the referenced item is still readable. */
+export function activityReferenceIds(event: Pick<DriveEventRow, "itemId" | "parentId" | "details">): string[] {
+  return [...new Set([event.itemId, event.parentId, event.details.fromParentId, event.details.sourceId]
+    .filter((id): id is string => typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)))];
+}
+
+/**
+ * AI history uses current authorized names, never historical names or arbitrary detail text.
+ * A moved/copied item's old location can be private, excluded, protected or deleted today.
+ */
+export function chatActivityDetails(
+  event: Pick<DriveEventRow, "parentId" | "details">,
+  readable: (id: string) => { id: string; name: string } | undefined,
+): DriveEventDetails {
+  const details: DriveEventDetails = {};
+  for (const key of ["size", "count", "bytes"] as const) {
+    const value = event.details[key];
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) details[key] = value;
+  }
+  for (const key of ["publicRevoked", "restoredToRoot"] as const) {
+    if (typeof event.details[key] === "boolean") details[key] = event.details[key];
+  }
+  const fromId = event.details.fromParentId;
+  const from = typeof fromId === "string" ? readable(fromId) : undefined;
+  if (from) {
+    details.fromParentId = from.id;
+    details.fromParentName = from.name;
+  }
+  const to = event.parentId ? readable(event.parentId) : undefined;
+  if (to) details.toParentName = to.name;
+  const sourceId = event.details.sourceId;
+  const source = typeof sourceId === "string" ? readable(sourceId) : undefined;
+  if (source) details.sourceId = source.id;
+  return details;
+}
 
 /**
  * Appends events to the shared activity history inside the caller's transaction, so an event exists
