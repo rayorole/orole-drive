@@ -29,7 +29,7 @@ Install Node.js 24 and provide these environment variables in `.env.local` (neve
 - `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_AI_API_TOKEN`: optional; turn on AI search. The token needs **Workers AI: Read** and **Vectorize: Edit**. Without both, search features stay hidden and nothing is sent anywhere.
 - `VECTORIZE_INDEX`: Vectorize index name, default `orole-drive-search`.
 - `OPENROUTER_API_KEY`: optional; image captions for search and **Ask your drive** answers. Set it in Vercel too.
-- `SEARCH_CAPTION_MODEL` and `SEARCH_CHAT_MODEL`: OpenRouter model slugs, default `anthropic/claude-haiku-4.5` and `z-ai/glm-5.3-flash`.
+- `SEARCH_CAPTION_MODEL` and `SEARCH_CHAT_MODEL`: OpenRouter model slugs, default `anthropic/claude-haiku-4.5` and `stealth/space-bunny-alpha`.
 - `DRIVE_STORAGE_QUOTA_BYTES`: whole-drive storage limit in bytes, default 1 TiB.
 - `DRIVE_MEMBER_QUOTA_BYTES`: storage limit per contributing member in bytes, default 250 GiB.
 
