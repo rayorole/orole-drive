@@ -231,7 +231,7 @@ export function ChatAssistantMessage() {
       {failedSteps.map((step) => <ToolError key={step.id} name={step.tool} target={step.label} message={step.error ?? "The tool failed."} attempt={1} maxAttempts={1}
         retrying={regenerating} onRetry={canRegenerate ? context.onRegenerate : undefined} className="max-w-none" />)}
       {entry.content && <div className="w-full break-words"><MessagePrimitive.Parts components={{ Text: CitedMarkdownText, Empty: NoMessageFallback }} /></div>}
-      {running && !entry.steps.some((step) => step.status === "running") && <AnswerProgress label={entry.content.trim() ? "Writing" : "Thinking"} />}
+      {running && !entry.steps.some((step) => step.status === "running") && <GenerationLoader label={entry.content.trim() ? "Writing" : "Thinking"} />}
       {entry.steps.flatMap((step) => step.comparison ? [<ComparisonCard key={step.id} {...step.comparison} className="max-w-none" />] : [])}
       {entry.steps.flatMap((step) => step.diff && step.diff.lines.length ? [<CodeDiff key={step.id} filename={step.diff.filename} additions={step.diff.additions} deletions={step.diff.deletions} lines={step.diff.lines} cycle={0} className="max-w-none" />] : [])}
       {entry.status === "error" && <ErrorState title="The answer didn't finish" detail={entry.error ?? "Please try again."} retrying={regenerating} onRetry={canRegenerate ? context.onRegenerate : () => {}} className="max-w-none" />}
@@ -261,13 +261,4 @@ export function ChatAssistantMessage() {
       </div>}
     </AssistantReply>
   </MessagePrimitive.Root>;
-}
-
-function AnswerProgress({ label }: { label: string }) {
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    const timer = window.setInterval(() => setTick((value) => value + 1), 120);
-    return () => window.clearInterval(timer);
-  }, []);
-  return <GenerationLoader label={label} tick={tick} className="items-start py-1" />;
 }
