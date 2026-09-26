@@ -412,6 +412,8 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
                       rows={1}
                       autoFocus={autoFocus}
                       enterKeyHint="send"
+                      // Escape closes the surrounding sheet; stopping an answer stays on the stop button.
+                      cancelOnEscape={false}
                       aria-label="Message input"
                     /><ComposerAction /></ComposerPrimitive.AttachmentDropzone>
     </ComposerPrimitive.Root>

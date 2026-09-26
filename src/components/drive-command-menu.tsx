@@ -4,22 +4,20 @@ import { useQuery } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
 import {
   ArrowUp, Clock3, Download, File, Files, Folder, FolderInput, FolderPlus, FolderUp, HardDrive, LayoutGrid, Link2,
-  History, List, MessagesSquare, Moon, PanelLeft, Plug, Search, Star, StarOff, Sun, TextSearch, Trash2,
+  History, List, Moon, PanelLeft, Plug, Search, Sparkles, Star, StarOff, Sun, TextSearch, Trash2,
 } from "lucide-react";
 import { listDrive } from "@/lib/drive-read-client";
 import type { DriveFilter, DriveItem } from "@/lib/drive-types";
 import { canEditItem } from "@/lib/drive-permissions";
 import type { DriveItemAction } from "@/components/drive-item";
 import { CommandMenu, type CommandMenuAction } from "@/components/ui/command-menu";
-import { useSearchAvailability } from "@/components/search-availability";
 
-const views: { filter: DriveFilter | "activity" | "ask"; label: string; icon: typeof Files; keywords: string[] }[] = [
+const views: { filter: DriveFilter | "activity"; label: string; icon: typeof Files; keywords: string[] }[] = [
   { filter: "all", label: "All files", icon: Files, keywords: ["home", "root", "drive"] },
   { filter: "recent", label: "Recent", icon: Clock3, keywords: ["latest", "opened", "history"] },
   { filter: "favorites", label: "Favorites", icon: Star, keywords: ["starred"] },
   { filter: "public", label: "Public links", icon: Link2, keywords: ["shared", "share"] },
   { filter: "activity", label: "Activity", icon: History, keywords: ["history", "log", "changes", "who", "timeline"] },
-  { filter: "ask", label: "Ask your drive", icon: MessagesSquare, keywords: ["chat", "question", "ai", "assistant", "answer"] },
   { filter: "trash", label: "Trash", icon: Trash2, keywords: ["deleted", "bin", "restore"] },
 ];
 
@@ -32,14 +30,14 @@ function itemAction(item: DriveItem, prefix: string, onOpenItem: (item: DriveIte
   };
 }
 
-export function DriveCommandMenu({ filter, items, selected, canUpload, view, collapsed, onNavigate, onOpenItem, onItemAction, onUploadFiles, onUploadFolder, onNewFolder, onViewChange, onToggleSidebar, onConnectAgent, onOpenStorage, onEmptyTrash, onSearchInside }: {
-  filter: DriveFilter | "activity" | "ask";
+export function DriveCommandMenu({ filter, items, selected, canUpload, view, collapsed, onNavigate, onOpenItem, onItemAction, onUploadFiles, onUploadFolder, onNewFolder, onViewChange, onToggleSidebar, onConnectAgent, onOpenStorage, onEmptyTrash, onSearchInside, onAskAi }: {
+  filter: DriveFilter | "activity";
   items: DriveItem[];
   selected: DriveItem[];
   canUpload: boolean;
   view: "grid" | "list";
   collapsed: boolean;
-  onNavigate: (filter: DriveFilter | "activity" | "ask") => void;
+  onNavigate: (filter: DriveFilter | "activity") => void;
   onOpenItem: (item: DriveItem) => void;
   onItemAction: (action: DriveItemAction, items: DriveItem[]) => void;
   onUploadFiles: () => void;
@@ -52,9 +50,10 @@ export function DriveCommandMenu({ filter, items, selected, canUpload, view, col
   onEmptyTrash: () => void;
   /** Present when AI search is configured: shows "Found inside files" results for the typed query. */
   onSearchInside?: (query: string) => void;
+  /** Present when Ask AI is configured: opens the chat sheet. */
+  onAskAi?: () => void;
 }) {
   const { resolvedTheme, setTheme } = useTheme();
-  const { chat: chatEnabled } = useSearchAvailability();
   const recent = useQuery({
     queryKey: ["command-recent"],
     queryFn: async ({ signal }) => {
@@ -75,7 +74,7 @@ export function DriveCommandMenu({ filter, items, selected, canUpload, view, col
       { id: "sel-favorite", group: selection, label: allFavorites ? "Remove from favorites" : "Add to favorites", icon: allFavorites ? <StarOff /> : <Star />, action: () => onItemAction(allFavorites ? "unfavorite" : "favorite", selected) },
       { id: "sel-trash", group: selection, label: "Move to Trash", icon: <Trash2 />, disabled: !selected.every(canEditItem), action: () => onItemAction("trash", selected) },
     ] : []),
-    ...views.filter(({ filter: target }) => target !== "ask" || chatEnabled).map(({ filter: target, label, icon: Icon, keywords }) => ({
+    ...views.map(({ filter: target, label, icon: Icon, keywords }) => ({
       id: `go-${target}`, group: "Go to", label, keywords, icon: <Icon />,
       hint: target === filter ? "Current" : undefined,
       action: () => onNavigate(target),
@@ -85,6 +84,7 @@ export function DriveCommandMenu({ filter, items, selected, canUpload, view, col
       keywords: ["recent", "open"], disabled: recentFiles.length === 0,
       children: recentFiles.map((item) => itemAction(item, "recent", onOpenItem)),
     },
+    ...(onAskAi ? [{ id: "ask-ai", group: "Go to", label: "Ask AI", icon: <Sparkles />, keywords: ["chat", "question", "ai", "assistant", "answer", "ask your drive"], action: onAskAi }] : []),
     {
       id: "search-files", group: "Go to", label: "Search all files", icon: <Search />, shortcut: ["/"],
       action: () => { requestAnimationFrame(() => document.getElementById("drive-global-search")?.focus()); },

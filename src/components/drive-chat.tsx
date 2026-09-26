@@ -14,6 +14,7 @@ import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/spinner";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 
 /** A message in this view: saved on the server, or the question and answer still streaming. */
 type ChatEntry = Omit<DriveChatMessage, "createdAt"> & { searches: string[]; status: "running" | "complete" | "error"; error?: string };
@@ -130,8 +131,8 @@ function SearchSteps({ children }: PropsWithChildren) {
 
 function Welcome() {
   return <div className="mb-6 flex flex-col gap-1.5 px-2">
-    <p className="text-2xl font-medium tracking-tight">Ask your drive</p>
-    <p className="max-w-md text-sm text-muted-foreground">Answers come only from files you can open, with numbered sources. Chats are private to you. Password-protected and excluded folders are never searched.</p>
+    <p className="text-2xl font-medium tracking-tight">What would you like to know?</p>
+    <p className="max-w-md text-sm text-muted-foreground">Ask about anything in your files. Password-protected and excluded folders are never searched.</p>
   </div>;
 }
 
@@ -268,11 +269,11 @@ export function DriveChatView({ onOpenItem }: { onOpenItem: (item: DriveItem) =>
 
   return <AssistantRuntimeProvider runtime={runtime}>
     <CitationsContext.Provider value={citations}>
-      <div className="flex h-[calc(100dvh-13rem)] min-h-[28rem] flex-col gap-4 md:flex-row">
-        <aside aria-label="Chats" className="max-h-44 shrink-0 overflow-y-auto md:max-h-none md:w-60">
+      <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
+        <aside aria-label="Chats" className="max-h-36 shrink-0 overflow-y-auto border-b border-border/70 p-2 sm:max-h-none sm:w-56 sm:border-r sm:border-b-0">
           <ThreadList />
         </aside>
-        <section aria-label="Conversation" className="min-h-0 min-w-0 flex-1 overflow-hidden rounded-xl border border-border/70">
+        <section aria-label="Conversation" className="min-h-0 min-w-0 flex-1 overflow-hidden">
           {chat.isError && chatId ? <p role="alert" className="p-4 text-sm text-destructive">{chat.error.message}</p> : <Thread components={threadComponents} />}
         </section>
       </div>
@@ -290,4 +291,30 @@ export function DriveChatView({ onOpenItem }: { onOpenItem: (item: DriveItem) =>
       </AlertDialogContent>
     </AlertDialog>}
   </AssistantRuntimeProvider>;
+}
+
+/**
+ * Ask AI in a right-hand sheet. It stays mounted while closed, so a streaming answer and the open
+ * chat survive closing it. A cited file opens only once the sheet has finished closing, so the two
+ * modals never overlap mid-animation.
+ */
+export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; onOpenChange: (open: boolean) => void; onOpenItem: (item: DriveItem) => void }) {
+  const [opening, setOpening] = useState<DriveItem | null>(null);
+  const openSource = (item: DriveItem) => {
+    setOpening(item);
+    onOpenChange(false);
+  };
+  return <Sheet open={open} onOpenChange={onOpenChange} onOpenChangeComplete={(isOpen) => {
+    if (isOpen || !opening) return;
+    setOpening(null);
+    onOpenItem(opening);
+  }}>
+    <SheetContent side="right" keepMounted className="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-3xl">
+      <SheetHeader className="border-b border-border/70 pr-12">
+        <SheetTitle>Ask AI</SheetTitle>
+        <SheetDescription>Answers from files you can open, with sources. Chats are private to you.</SheetDescription>
+      </SheetHeader>
+      <DriveChatView onOpenItem={openSource} />
+    </SheetContent>
+  </Sheet>;
 }
