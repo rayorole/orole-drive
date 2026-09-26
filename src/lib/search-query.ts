@@ -30,6 +30,8 @@ export const semanticSearchInput = z.object({
   limit: z.number().int().min(1).max(25).default(10),
   folderId: idSchema.nullable().optional(),
   type: z.enum(["all", "folder", "image", "video", "audio", "pdf", "text", "code", "archive", "other"]).optional(),
+  /** Only files owned by this member (used by Ask AI when someone is @mentioned). */
+  ownerId: z.string().min(1).max(64).optional(),
 });
 
 function insideFolder(nodes: ReadonlyMap<string, SearchNode>, id: string, folderId: string): boolean {
@@ -48,7 +50,7 @@ function insideFolder(nodes: ReadonlyMap<string, SearchNode>, id: string, folder
  * unfinished items are dropped without a trace. When Cloudflare fails, keyword results still return.
  */
 export async function semanticSearch(ctx: DriveContext, input: SemanticSearchInput): Promise<SemanticSearchResult> {
-  const { query, limit, folderId, type } = semanticSearchInput.parse(input);
+  const { query, limit, folderId, type, ownerId } = semanticSearchInput.parse(input);
   if (!isSearchConfigured()) throw new DriveError("AI search is not set up for this drive.");
   if (!await consumeThrottle(getDb(), `semantic-search:${ctx.userId}`, SEARCHES_PER_MINUTE, 60)) {
     throw new DriveError("Too many searches in a short time. Wait a minute and try again.");
@@ -73,6 +75,7 @@ export async function semanticSearch(ctx: DriveContext, input: SemanticSearchInp
         inArray(driveSearchChunks.id, [...fused.keys()]),
         eq(driveItems.kind, "file"), eq(driveItems.state, "complete"), isNull(driveItems.trashedAt), isNull(driveItems.deletionStartedAt),
         type && type !== "all" ? sql`${itemType} = ${type}` : undefined,
+        ownerId ? eq(driveItems.ownerId, ownerId) : undefined,
       ));
     const itemIds = [...new Set(rows.map((row) => row.item.id))];
     const nodes = await loadSearchNodes(tx, itemIds);

@@ -54,20 +54,52 @@ export type SearchIndexStatus = {
   state: "queued" | "indexing" | "indexed" | "skipped" | "failed" | "not_indexed";
   skipReason: "too_large" | "unsupported" | "excluded" | "protected" | "empty" | "trashed" | null;
 };
-export type SemanticSearchInput = { query: string; limit?: number; folderId?: string | null; type?: DriveTypeFilter };
+export type SemanticSearchInput = { query: string; limit?: number; folderId?: string | null; type?: DriveTypeFilter; ownerId?: string };
 /** One file found by its contents. `folderId` is where it is listed for this session (null = top level). `path` names only readable ancestors. */
 export type SemanticSearchHit = { item: DriveItem; folderId: string | null; path: string[]; score: number; passages: { text: string; location: string | null }[] };
 /** `degraded`: meaning-based search was unavailable, so only exact keyword matches are shown. */
 export type SemanticSearchResult = { results: SemanticSearchHit[]; degraded: boolean };
-export type DriveChatSummary = { id: string; title: string; updatedAt: string };
-/** `item` is re-authorized every time a chat is loaded: null when this member can no longer open it. */
-export type DriveChatCitation = { n: number; itemId: string; name: string; location: string | null; item: DriveItem | null };
-export type DriveChatMessage = { id: string; role: "user" | "assistant"; content: string; createdAt: string; citations: DriveChatCitation[] };
+export type DriveChatSummary = { id: string; title: string; updatedAt: string; preview: string };
+/**
+ * `item` is re-authorized every time a chat is loaded: null when this member can no longer open it.
+ * `quote` and `path` are only present while `item` is.
+ */
+export type DriveChatCitation = { n: number; itemId: string; name: string; location: string | null; quote: string | null; path: string[]; item: DriveItem | null };
+export type DriveChatAttachment = { name: string; size: number; kind: "image" | "text" | "archive" };
+export type DriveChatDiffLine = { kind: "context" | "added" | "removed"; text: string };
+export type DriveChatComparison = {
+  traitLabels: string[];
+  options: { id: string; name: string; headline: string; traits: (string | false)[] }[];
+  recommendedId: string;
+  reason: string;
+};
+export type DriveChatToolName = "search_drive" | "read_file_excerpt" | "compare_versions" | "present_comparison";
+/**
+ * One tool call in an answer. `label` is what the call was about (a query or a file name); `diff` holds
+ * compared file lines and is dropped when the member can no longer open `itemId`.
+ */
+export type DriveChatStep = {
+  id: string;
+  tool: DriveChatToolName;
+  status: "running" | "done" | "error";
+  label: string;
+  summary?: string;
+  error?: string;
+  itemId?: string;
+  diff?: { filename: string; additions: number; deletions: number; lines: DriveChatDiffLine[] };
+  comparison?: DriveChatComparison;
+};
+export type DriveChatMessage = {
+  id: string; role: "user" | "assistant"; content: string; createdAt: string; citations: DriveChatCitation[];
+  steps: DriveChatStep[]; attachments: DriveChatAttachment[]; feedback: "up" | "down" | null;
+};
 export type DriveChat = DriveChatSummary & { messages: DriveChatMessage[] };
+/** Which parts of Ask AI are available, for the assistant's server panel. */
+export type DriveAssistantStatus = { model: string; semanticIndex: boolean; captions: boolean };
 /** One NDJSON line of the /api/drive/chat response stream. */
 export type ChatStreamEvent =
   | { type: "chat"; chatId: string; title: string }
-  | { type: "searching"; query: string }
+  | { type: "step"; step: DriveChatStep }
   | { type: "text"; delta: string }
   | { type: "done"; messageId: string }
   | { type: "error"; message: string };

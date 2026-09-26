@@ -25,7 +25,7 @@ export async function POST(request: Request) {
     return Response.json({ success: false, error: "Check the information and try again." }, { status: 400, headers });
   }
   // The question is saved before streaming, so it survives a dropped connection.
-  const started = await driveAction(async (ctx): Promise<{ ctx: DriveContext; turn: ChatTurn }> => ({ ctx, turn: await startChatTurn(ctx, body) }), "read");
+  const started = await driveAction(async (ctx): Promise<{ ctx: DriveContext; turn: ChatTurn }> => ({ ctx, turn: await startChatTurn(ctx, body, request.signal) }), "read");
   if (!started.success) return Response.json(started, { status: 400, headers });
   return new Response(answerChatTurn(started.data.ctx, started.data.turn, request.signal), {
     headers: { ...headers, "Content-Type": "application/x-ndjson; charset=utf-8", "X-Accel-Buffering": "no" },

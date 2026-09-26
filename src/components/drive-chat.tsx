@@ -1,26 +1,33 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AssistantRuntimeProvider, useAuiState, useExternalStoreRuntime, type AppendMessage, type ExternalStoreThreadListAdapter, type ThreadMessageLike, type ToolCallMessagePartComponent } from "@assistant-ui/react";
-import { Search } from "lucide-react";
+import { AssistantRuntimeProvider, ThreadPrimitive, useAuiState, useExternalStoreRuntime, type ThreadMessageLike } from "@assistant-ui/react";
+import { ChevronDown, Ellipsis, Maximize2, Minimize2, Pencil, Plus, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
-import { deleteChat, renameChat } from "@/app/actions/chat";
+import { deleteChat, renameChat, setChatFeedback } from "@/app/actions/chat";
 import { getChat, listChats } from "@/lib/drive-read-client";
-import type { ChatStreamEvent, DriveChatCitation, DriveChatMessage, DriveItem } from "@/lib/drive-types";
-import { Thread, type ThreadComponents } from "@/components/assistant-ui/thread.aui";
-import { ThreadList } from "@/components/assistant-ui/thread-list.aui";
-import { MarkdownText } from "@/components/assistant-ui/markdown-text";
+import type { ChatStreamEvent, DriveChatStep, DriveItem } from "@/lib/drive-types";
+import { ConversationSearch, type SearchHit } from "@/components/assistant-ui/elements/conversation-search";
+import { EmptyState, EmptyStateGreeting, EmptyStateSuggestion, EmptyStateSuggestions } from "@/components/assistant-ui/elements/empty-state";
+import { PermissionGrant, type GrantScope } from "@/components/assistant-ui/elements/permission-grant";
+import { ghostButton } from "@/components/assistant-ui/elements/surfaces";
+import { ThreadSearch } from "@/components/assistant-ui/elements/thread-search";
+import { ChatAssistantMessage, ChatMessageProvider, ChatUserMessage, dayLabel, linkCitations, type ChatEntry, type ChatMessageContext } from "@/components/drive-chat-message";
+import { ChatComposer, type ComposerSubmission } from "@/components/drive-chat-composer";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
-import { Spinner } from "@/components/spinner";
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Sheet, SheetClose, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
+import { cn } from "@/lib/utils";
 
-/** A message in this view: saved on the server, or the question and answer still streaming. */
-type ChatEntry = Omit<DriveChatMessage, "createdAt"> & { searches: string[]; status: "running" | "complete" | "error"; error?: string };
+const SUGGESTIONS = ["What did I upload this week?", "Find my latest invoices", "Summarize the documents in my shared folders"];
 
 /** Streams one answer from /api/drive/chat, calling `onEvent` for each NDJSON line. */
-async function streamAnswer(input: { chatId: string | null; message: string; userMessageId: string; assistantMessageId: string }, onEvent: (event: ChatStreamEvent) => void, signal: AbortSignal) {
+async function streamAnswer(input: Record<string, unknown>, onEvent: (event: ChatStreamEvent) => void, signal: AbortSignal) {
   const response = await fetch("/api/drive/chat", {
     method: "POST", credentials: "same-origin", cache: "no-store", signal,
     headers: { "Content-Type": "application/json", "X-Orole-Chat": "1" },
@@ -47,107 +54,106 @@ async function streamAnswer(input: { chatId: string | null; message: string; use
   }
 }
 
-/** [n] markers become in-page links that the Markdown renderer turns into source buttons. */
-function linkCitations(text: string, citations: DriveChatCitation[]) {
-  const known = new Set(citations.map((citation) => citation.n));
-  return text.replace(/\[(\d{1,3})\](?!\()/g, (marker, n: string) => known.has(Number(n)) ? `[${n}](#source-${n})` : marker);
+// Consent to send passages to the model: "always" is remembered on this device, "session" for this tab.
+const CONSENT_KEY = "orole.ask-ai.consent";
+const consentListeners = new Set<() => void>();
+function readConsent(): GrantScope | "pending" {
+  const value = localStorage.getItem(CONSENT_KEY) ?? sessionStorage.getItem(CONSENT_KEY);
+  return value === "always" || value === "session" || value === "denied" ? value : "pending";
+}
+function writeConsent(scope: GrantScope | "pending") {
+  localStorage.removeItem(CONSENT_KEY);
+  sessionStorage.removeItem(CONSENT_KEY);
+  if (scope === "always") localStorage.setItem(CONSENT_KEY, scope);
+  else if (scope !== "pending") sessionStorage.setItem(CONSENT_KEY, scope);
+  consentListeners.forEach((listener) => listener());
+}
+function useConsent() {
+  return useSyncExternalStore((listener) => { consentListeners.add(listener); return () => consentListeners.delete(listener); }, readConsent, () => "pending" as const);
 }
 
 function convertMessage(entry: ChatEntry): ThreadMessageLike {
   if (entry.role === "user") return { id: entry.id, role: "user", content: [{ type: "text", text: entry.content }] };
-  const finished = entry.status !== "running";
   return {
     id: entry.id, role: "assistant",
-    content: [
-      ...entry.searches.map((query, index) => ({
-        type: "tool-call" as const, toolCallId: `${entry.id}-search-${index}`, toolName: "search_drive", args: { query },
-        // A search is done once the model moved on: a later search, answer text, or the end of the turn.
-        result: finished || index < entry.searches.length - 1 || entry.content ? "done" : undefined,
-      })),
-      ...(entry.content ? [{ type: "text" as const, text: linkCitations(entry.content, entry.citations) }] : []),
-    ],
-    status: entry.status === "running" ? { type: "running" } : entry.status === "error" ? { type: "incomplete", reason: "error", error: entry.error ?? "The answer could not be completed." } : { type: "complete", reason: "stop" },
+    content: entry.content ? [{ type: "text", text: linkCitations(entry.content, entry.citations) }] : [],
+    status: entry.status === "running" ? { type: "running" } : entry.status === "error" ? { type: "incomplete", reason: "error", error: entry.error ?? "" } : { type: "complete", reason: "stop" },
   };
 }
 
-type CitationLookup = { byMessage: ReadonlyMap<string, DriveChatCitation[]>; onOpen: (item: DriveItem) => void };
-const CitationsContext = createContext<CitationLookup>({ byMessage: new Map(), onOpen: () => {} });
-
-function useMessageCitations() {
-  const { byMessage, onOpen } = useContext(CitationsContext);
-  const messageId = useAuiState((state) => state.message.id);
-  return { citations: byMessage.get(messageId) ?? [], onOpen };
+function ThreadMessage() {
+  const role = useAuiState((state) => state.message.role);
+  return role === "user" ? <ChatUserMessage /> : <ChatAssistantMessage />;
 }
 
-/** Source markers inside the answer. Other links from the model are shown as text: file contents are untrusted. */
-function CitedMarkdownText() {
-  const { citations, onOpen } = useMessageCitations();
-  return <MarkdownText components={{
-    a: ({ href, children }) => {
-      const citation = href?.startsWith("#source-") ? citations.find((entry) => `#source-${entry.n}` === href) : undefined;
-      if (!citation) return <span>{children}</span>;
-      const item = citation.item;
-      return item
-        ? <button type="button" onClick={() => onOpen(item)} aria-label={`Source ${citation.n}: ${citation.name}`}
-          className="mx-0.5 inline-flex h-4.5 min-w-4.5 items-center justify-center rounded bg-muted px-1 align-text-top text-[11px] font-medium tabular-nums text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">{citation.n}</button>
-        : <span className="mx-0.5 rounded bg-muted px-1 text-[11px] tabular-nums text-muted-foreground/70" title="No longer available">{citation.n}</span>;
-    },
-  }} />;
+/** Ctrl/⌘ F inside the sheet: every text match across the thread, stepped through in order. */
+function useConversationSearch(messages: ChatEntry[]) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const hits = useMemo<(SearchHit & { messageId: string })[]>(() => {
+    const needle = query.trim().toLowerCase();
+    if (needle.length < 2) return [];
+    const found: (SearchHit & { messageId: string })[] = [];
+    messages.forEach((message, index) => {
+      // Search what the reader sees, not Markdown syntax or citation markers.
+      const text = message.content.replace(/[*_`#>]+/g, "").replace(/\[(\d{1,3})\]/g, "");
+      for (let at = text.toLowerCase().indexOf(needle); at >= 0 && found.length < 200; at = text.toLowerCase().indexOf(needle, at + needle.length)) {
+        found.push({
+          id: `${message.id}-${at}`, messageId: message.id,
+          before: `${at > 40 ? "…" : ""}${text.slice(Math.max(0, at - 40), at)}`, match: text.slice(at, at + needle.length), after: `${text.slice(at + needle.length, at + needle.length + 60)}…`,
+          position: messages.length > 1 ? (index / (messages.length - 1)) * 96 : 0,
+        });
+      }
+    });
+    return found;
+  }, [messages, query]);
+  const current = hits.length ? hits[Math.min(active, hits.length - 1)] : undefined;
+  useEffect(() => {
+    if (current) document.getElementById(`chat-message-${current.messageId}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [current]);
+  return {
+    open, query, hits, active: Math.min(active, Math.max(0, hits.length - 1)), activeMessageId: open ? current?.messageId ?? null : null,
+    show: () => setOpen(true), hide: () => { setOpen(false); setQuery(""); },
+    setQuery: (next: string) => { setQuery(next); setActive(0); },
+    step: (delta: number) => setActive((index) => hits.length ? (index + delta + hits.length) % hits.length : 0),
+  };
 }
 
-/** Every source of an answer, re-authorized on load: ones this member can no longer open are marked. */
-function ChatSources() {
-  const { citations, onOpen } = useMessageCitations();
-  if (!citations.length) return null;
-  return <ul aria-label="Sources" className="mt-3 flex flex-wrap gap-1.5">
-    {citations.map((citation) => {
-      const label = `${citation.name}${citation.location ? ` · ${citation.location}` : ""}`;
-      const item = citation.item;
-      return <li key={citation.n} className="max-w-full">
-        {item
-          ? <button type="button" onClick={() => onOpen(item)} aria-label={`Source ${citation.n}: open ${label}`}
-            className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border/70 px-2 py-1 text-xs outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring">
-            <span className="tabular-nums text-muted-foreground">{citation.n}</span><span className="truncate">{label}</span>
-          </button>
-          : <span className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-dashed border-border px-2 py-1 text-xs text-muted-foreground">
-            <span className="tabular-nums">{citation.n}</span><span className="truncate line-through">{label}</span><Badge variant="secondary">No longer available</Badge>
-          </span>}
-      </li>;
-    })}
-  </ul>;
+/** "now", "12m", "3h", "9d": how long ago a chat was last active. */
+function relativeAge(iso: string) {
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60_000));
+  if (minutes < 1) return "now";
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 60 * 24) return `${Math.round(minutes / 60)}h`;
+  return `${Math.round(minutes / (60 * 24))}d`;
 }
 
-const SearchStep: ToolCallMessagePartComponent = ({ args, result }) => {
-  const query = typeof args.query === "string" ? args.query : "";
-  return <p className="flex items-center gap-1.5 py-0.5 text-xs text-muted-foreground">
-    {result === undefined ? <Spinner size={12} label="Searching" /> : <Search className="size-3.5" aria-hidden="true" />}
-    {result === undefined ? "Searching your files for" : "Searched your files for"} “{query}”
-  </p>;
-};
-
-function SearchSteps({ children }: PropsWithChildren) {
-  return <div className="mb-2 flex flex-col">{children}</div>;
+/** Today / Yesterday / Earlier buckets for the history popover. */
+function historyGroup(iso: string) {
+  const label = dayLabel(iso);
+  return label === "Today" || label === "Yesterday" ? label : Date.now() - new Date(iso).getTime() < 7 * 86_400_000 ? "This week" : "Earlier";
 }
 
-function Welcome() {
-  return <div className="mb-6 flex flex-col gap-1.5 px-2">
-    <p className="text-2xl font-medium tracking-tight">What would you like to know?</p>
-    <p className="max-w-md text-sm text-muted-foreground">Ask about anything in your files. Password-protected and excluded folders are never searched.</p>
-  </div>;
-}
-
-const threadComponents: ThreadComponents = {
-  Welcome, Text: CitedMarkdownText, MessageFooter: ChatSources, ToolFallback: SearchStep, ToolGroup: SearchSteps,
-  placeholder: "Ask a question about your files…",
-};
-
-/** "Ask your drive": assistant-ui thread and history over the member's private, server-saved chats. */
-export function DriveChatView({ onOpenItem }: { onOpenItem: (item: DriveItem) => void }) {
+/**
+ * Ask AI: a right-hand sheet with the member's private chats. It stays mounted while closed, so an answer
+ * keeps streaming; a cited file opens once the sheet has finished closing so the two modals never overlap.
+ */
+export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; onOpenChange: (open: boolean) => void; onOpenItem: (item: DriveItem) => void }) {
   const client = useQueryClient();
+  const consent = useConsent();
+  const [wide, setWide] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyQuery, setHistoryQuery] = useState("");
   const [chatId, setChatId] = useState<string | null>(null);
   const [pending, setPending] = useState<ChatEntry[] | null>(null);
-  const [isRunning, setIsRunning] = useState(false);
-  const [deleting, setDeleting] = useState<{ id: string; title: string; resolve: () => void } | null>(null);
+  const [hiddenId, setHiddenId] = useState<string | null>(null);
+  const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
+  const [running, setRunning] = useState(false);
+  const [feedback, setFeedback] = useState<Record<string, "up" | "down" | null>>({});
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [opening, setOpening] = useState<DriveItem | null>(null);
   const abort = useRef<AbortController | null>(null);
   useEffect(() => () => abort.current?.abort(), []);
 
@@ -172,47 +178,44 @@ export function DriveChatView({ onOpenItem }: { onOpenItem: (item: DriveItem) =>
     staleTime: 0,
   });
 
-  const saved = useMemo<ChatEntry[]>(() => (chatId ? chat.data?.messages ?? [] : []).map((message) => ({ ...message, searches: [], status: "complete" })), [chatId, chat.data]);
-  // The question is saved before its answer streams; while a draft exists, it replaces the saved copy.
-  const messages = useMemo(() => {
-    if (!pending) return saved;
-    const drafts = new Set(pending.map((entry) => entry.id));
-    return [...saved.filter((entry) => !drafts.has(entry.id)), ...pending];
-  }, [saved, pending]);
-  const citations = useMemo<CitationLookup>(() => ({ byMessage: new Map(messages.map((message) => [message.id, message.citations])), onOpen: onOpenItem }), [messages, onOpenItem]);
+  const messages = useMemo<ChatEntry[]>(() => {
+    const saved: ChatEntry[] = (chatId ? chat.data?.messages ?? [] : []).map((message) => ({ ...message, feedback: feedback[message.id] !== undefined ? feedback[message.id] : message.feedback, status: "complete" }));
+    const drafts = new Set((pending ?? []).map((entry) => entry.id));
+    return [...saved.filter((entry) => !drafts.has(entry.id) && entry.id !== hiddenId), ...(pending ?? [])];
+  }, [chatId, chat.data, pending, hiddenId, feedback]);
+  const search = useConversationSearch(messages);
+  const title = chatId ? chats.data?.find((entry) => entry.id === chatId)?.title ?? chat.data?.title ?? "Chat" : "New chat";
 
   function switchTo(id: string | null) {
     abort.current?.abort();
     setPending(null);
-    setIsRunning(false);
+    setHiddenId(null);
+    setRunning(false);
     setChatId(id);
+    setHistoryOpen(false);
+    search.hide();
   }
 
-  async function onNew(message: AppendMessage) {
-    const part = message.content[0];
-    const text = part?.type === "text" ? part.text.trim() : "";
-    if (!text) return;
-    // The server saves both messages under these ids, so the refetched thread continues this one exactly.
-    const userId = crypto.randomUUID();
-    const assistantId = crypto.randomUUID();
+  async function run(input: Record<string, unknown>, entries: ChatEntry[], assistantId: string) {
     const update = (change: (entry: ChatEntry) => ChatEntry) => setPending((current) => current && current.map((entry) => entry.id === assistantId ? change(entry) : entry));
-    setPending([
-      { id: userId, role: "user", content: text, citations: [], searches: [], status: "complete" },
-      { id: assistantId, role: "assistant", content: "", citations: [], searches: [], status: "running" },
-    ]);
-    setIsRunning(true);
+    setPending(entries);
+    setRunning(true);
     const controller = new AbortController();
     abort.current = controller;
     let target = chatId;
     let failed = false;
     try {
-      await streamAnswer({ chatId, message: text, userMessageId: userId, assistantMessageId: assistantId }, (event) => {
+      await streamAnswer({ ...input, chatId, assistantMessageId: assistantId }, (event) => {
         if (event.type === "chat") {
           target = event.chatId;
           setChatId(event.chatId);
           void client.invalidateQueries({ queryKey: ["drive-chats"] });
-        } else if (event.type === "searching") update((entry) => ({ ...entry, searches: [...entry.searches, event.query] }));
-        else if (event.type === "text") update((entry) => ({ ...entry, content: entry.content + event.delta }));
+        } else if (event.type === "step") {
+          update((entry) => {
+            const steps: DriveChatStep[] = entry.steps.some((step) => step.id === event.step.id) ? entry.steps.map((step) => step.id === event.step.id ? event.step : step) : [...entry.steps, event.step];
+            return { ...entry, steps };
+          });
+        } else if (event.type === "text") update((entry) => ({ ...entry, content: entry.content + event.delta }));
         else if (event.type === "error") {
           failed = true;
           update((entry) => ({ ...entry, status: "error", error: event.message }));
@@ -223,65 +226,192 @@ export function DriveChatView({ onOpenItem }: { onOpenItem: (item: DriveItem) =>
       failed = true;
       update((entry) => ({ ...entry, status: "error", error: error instanceof Error ? error.message : "The question could not be sent." }));
     } finally {
-      if (abort.current === controller) setIsRunning(false);
+      if (abort.current === controller) setRunning(false);
+      setRegeneratingId(null);
     }
     // The saved answer, with citations checked against current access, replaces the streamed draft.
     if (target) await client.invalidateQueries({ queryKey: ["drive-chat", target] });
     void client.invalidateQueries({ queryKey: ["drive-chats"] });
-    if (!failed) setPending(null);
+    if (!failed) { setPending(null); setHiddenId(null); }
   }
 
-  const threadList: ExternalStoreThreadListAdapter = {
-    threadId: chatId ?? undefined,
-    isLoading: chats.isPending,
-    threads: (chats.data ?? []).map((entry) => ({ id: entry.id, status: "regular", title: entry.title })),
-    onSwitchToNewThread: () => switchTo(null),
-    onSwitchToThread: (id) => switchTo(id),
-    onRename: async (id, title) => {
-      const result = await renameChat({ id, title });
-      if (!result.success) toast.error(result.error);
-      void client.invalidateQueries({ queryKey: ["drive-chats"] });
-    },
-    // The list only drops a chat once it is deleted on the server, after the member confirms.
-    onDelete: (id) => new Promise<void>((resolve) => setDeleting({ id, title: chats.data?.find((entry) => entry.id === id)?.title ?? "this chat", resolve })),
-  };
+  const draftAssistant = (id: string): ChatEntry => ({ id, role: "assistant", content: "", createdAt: new Date().toISOString(), citations: [], steps: [], attachments: [], feedback: null, status: "running" });
+
+  function send({ text, mentions, attachments }: ComposerSubmission) {
+    if (running || consent === "pending" || consent === "denied") return false;
+    const userId = crypto.randomUUID();
+    const assistantId = crypto.randomUUID();
+    void run({ message: text, userMessageId: userId, mentionIds: mentions.map((member) => member.id), attachments: attachments.map(({ name, mimeType, data }) => ({ name, mimeType, data })) }, [
+      { id: userId, role: "user", content: text, createdAt: new Date().toISOString(), citations: [], steps: [], attachments: attachments.map(({ name, size, kind }) => ({ name, size, kind })), feedback: null, status: "complete", mentions: mentions.map((member) => member.name) },
+      draftAssistant(assistantId),
+    ], assistantId);
+    return true;
+  }
+
+  function regenerate() {
+    const last = messages.findLast((entry) => entry.role === "assistant");
+    if (!chatId || running || !last) return;
+    const assistantId = crypto.randomUUID();
+    setRegeneratingId(last.id);
+    setHiddenId(last.id);
+    void run({ regenerate: true }, [draftAssistant(assistantId)], assistantId);
+  }
+
+  function stop() {
+    abort.current?.abort();
+    setRunning(false);
+    setPending((current) => current && current.map((entry) => entry.status === "running" ? { ...entry, status: "error", error: "Stopped." } : entry));
+  }
 
   const runtime = useExternalStoreRuntime<ChatEntry>({
-    messages, convertMessage, isRunning, onNew,
+    messages, convertMessage, isRunning: running,
     isLoading: Boolean(chatId) && chat.isPending && !pending,
-    onCancel: async () => { abort.current?.abort(); setIsRunning(false); setPending((current) => current && current.map((entry) => entry.status === "running" ? { ...entry, status: "error", error: "Stopped." } : entry)); },
-    adapters: { threadList },
+    onNew: async () => {},
+    onCancel: async () => stop(),
   });
 
+  const context: ChatMessageContext = {
+    byId: new Map(messages.map((entry) => [entry.id, entry])),
+    lastAssistantId: messages.findLast((entry) => entry.role === "assistant")?.id ?? null,
+    running, regeneratingId, searchHitId: search.activeMessageId,
+    onOpenItem: (item) => { setOpening(item); onOpenChange(false); },
+    onRegenerate: regenerate,
+    onFeedback: (messageId, value) => {
+      setFeedback((current) => ({ ...current, [messageId]: value }));
+      void setChatFeedback({ messageId, feedback: value }).then((result) => {
+        if (!result.success) {
+          toast.error(result.error);
+          setFeedback((current) => { const next = { ...current }; delete next[messageId]; return next; });
+        }
+      });
+    },
+  };
+
   async function confirmDelete() {
-    if (!deleting) return;
-    const result = await deleteChat(deleting.id);
+    if (!chatId) return;
+    const result = await deleteChat(chatId);
     if (!result.success) toast.error(result.error);
     else {
-      if (deleting.id === chatId) switchTo(null);
-      client.removeQueries({ queryKey: ["drive-chat", deleting.id] });
+      client.removeQueries({ queryKey: ["drive-chat", chatId] });
+      switchTo(null);
       await client.invalidateQueries({ queryKey: ["drive-chats"] });
       toast.success("Chat deleted");
     }
-    deleting.resolve();
-    setDeleting(null);
+    setDeleting(false);
   }
 
-  return <AssistantRuntimeProvider runtime={runtime}>
-    <CitationsContext.Provider value={citations}>
-      <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-        <aside aria-label="Chats" className="max-h-36 shrink-0 overflow-y-auto border-b border-border/70 p-2 sm:max-h-none sm:w-56 sm:border-r sm:border-b-0">
-          <ThreadList />
-        </aside>
-        <section aria-label="Conversation" className="min-h-0 min-w-0 flex-1 overflow-hidden">
-          {chat.isError && chatId ? <p role="alert" className="p-4 text-sm text-destructive">{chat.error.message}</p> : <Thread components={threadComponents} />}
-        </section>
-      </div>
-    </CitationsContext.Provider>
-    {deleting && <AlertDialog open onOpenChange={(open) => { if (!open) { deleting.resolve(); setDeleting(null); } }}>
+  const empty = messages.length === 0 && !(chatId && chat.isPending);
+  const blocked = consent === "pending" || consent === "denied";
+
+  return <Sheet open={open} onOpenChange={onOpenChange} onOpenChangeComplete={(isOpen) => {
+    if (isOpen || !opening) return;
+    setOpening(null);
+    onOpenItem(opening);
+  }}>
+    <SheetContent side="right" keepMounted showCloseButton={false}
+      className={cn("gap-0 data-[side=right]:w-full motion-safe:transition-[max-width,opacity,translate]", wide ? "data-[side=right]:sm:max-w-4xl" : "data-[side=right]:sm:max-w-lg")}
+      onKeyDownCapture={(event) => {
+        // Find in this conversation instead of the drive's command menu.
+        if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "f") {
+          event.preventDefault();
+          event.stopPropagation();
+          search.show();
+        } else if (event.key === "Escape" && search.open) {
+          event.preventDefault();
+          event.stopPropagation();
+          search.hide();
+        }
+      }}>
+      <SheetDescription className="sr-only">Answers from files you can open, with sources. Chats are private to you.</SheetDescription>
+      <header className="flex h-12 shrink-0 items-center gap-1 border-b border-border/60 px-2">
+        <Popover open={historyOpen} onOpenChange={setHistoryOpen}>
+          <PopoverTrigger render={<button type="button" className="flex min-w-0 items-center gap-1 rounded-lg px-2 py-1.5 text-left outline-none hover:bg-foreground/[0.04] focus-visible:ring-2 focus-visible:ring-ring" />}>
+            <SheetTitle className="truncate text-sm font-medium">{title}</SheetTitle>
+            <ChevronDown className="size-3.5 shrink-0 text-foreground/45" />
+          </PopoverTrigger>
+          <PopoverContent align="start" className="max-h-[70dvh] w-80 gap-1 overflow-y-auto rounded-2xl p-1.5">
+            <ThreadSearch className="max-w-none border-0 bg-transparent p-1.5 dark:bg-transparent" placeholder="Search chats" query={historyQuery} onQueryChange={setHistoryQuery} activeId={chatId ?? ""}
+              threads={(chats.data ?? []).map((entry) => ({ id: entry.id, title: entry.title, group: historyGroup(entry.updatedAt), preview: `${relativeAge(entry.updatedAt)}${entry.preview && entry.preview !== entry.title ? ` · ${entry.preview}` : ""}` }))}
+              onSelect={(id) => switchTo(id)} />
+            <Button variant="outline" className="mx-1.5 mb-1.5 rounded-xl" onClick={() => switchTo(null)}><Plus data-icon="inline-start" />New conversation</Button>
+          </PopoverContent>
+        </Popover>
+        <div className="ms-auto flex items-center gap-0.5">
+          <button type="button" aria-label="New conversation" onClick={() => switchTo(null)} className={cn(ghostButton, "size-8")}><Plus className="size-4" /></button>
+          {chatId && <DropdownMenu>
+            <DropdownMenuTrigger render={<button type="button" aria-label="Chat actions" className={cn(ghostButton, "size-8")} />}><Ellipsis className="size-4" /></DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-44">
+              <DropdownMenuGroup>
+                <DropdownMenuItem onClick={() => setRenaming(title)}><Pencil />Rename</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => search.show()}>Find in chat<span className="ms-auto text-xs text-muted-foreground">Ctrl F</span></DropdownMenuItem>
+              </DropdownMenuGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuGroup>
+                <DropdownMenuItem variant="destructive" onClick={() => setDeleting(true)}><Trash2 />Delete</DropdownMenuItem>
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>}
+          <button type="button" aria-label={wide ? "Narrow" : "Expand"} onClick={() => setWide(!wide)} className={cn(ghostButton, "hidden size-8 sm:inline-flex")}>
+            {wide ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
+          </button>
+          <SheetClose render={<button type="button" aria-label="Close" className={cn(ghostButton, "size-8")} />}><X className="size-4" /></SheetClose>
+        </div>
+      </header>
+
+      <AssistantRuntimeProvider runtime={runtime}>
+        <ChatMessageProvider value={context}>
+          {search.open && <div className="border-b border-border/60 px-3 py-2">
+            <ConversationSearch className="max-w-none" query={search.query} hits={search.hits} activeIndex={search.active} onQueryChange={search.setQuery} onStep={search.step}
+              onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); search.step(event.shiftKey ? -1 : 1); } }} />
+          </div>}
+          <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
+            <ThreadPrimitive.Viewport className="relative flex min-h-0 flex-1 flex-col overflow-y-auto px-4 pt-4">
+              {blocked ? <div className="m-auto flex w-full max-w-sm flex-col items-center gap-3 py-8">
+                <PermissionGrant className="max-w-none" capability="Search and read your files for answers" requester="Ask AI" scope={consent === "denied" ? "denied" : "pending"}
+                  reach={["Passages from files you can open are sent to Anthropic through OpenRouter", "Password-protected and excluded folders are never included", "Your chats are saved for you only, until you delete them"]}
+                  onGrant={consent === "pending" ? writeConsent : undefined} />
+                {consent === "denied" && <Button variant="ghost" size="sm" onClick={() => writeConsent("pending")}>Review this choice</Button>}
+              </div> : empty ? <EmptyState className="m-auto max-w-none py-8">
+                <EmptyStateGreeting>What would you like to know?</EmptyStateGreeting>
+                <p className="-mt-4 max-w-sm text-center text-sm text-foreground/45">Answers come only from files you can open, with sources. Type @ to search one member&apos;s files.</p>
+                <EmptyStateSuggestions>
+                  {SUGGESTIONS.map((suggestion, index) => <EmptyStateSuggestion key={suggestion} index={index} onClick={() => send({ text: suggestion, mentions: [], attachments: [] })}>{suggestion}</EmptyStateSuggestion>)}
+                </EmptyStateSuggestions>
+              </EmptyState> : <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 pb-6">
+                <ThreadPrimitive.Messages>{() => <ThreadMessage />}</ThreadPrimitive.Messages>
+                {chat.isError && chatId && <p role="alert" className="text-sm text-destructive">{chat.error.message}</p>}
+              </div>}
+              <ThreadPrimitive.ViewportFooter className="sticky bottom-0 mt-auto bg-popover pb-3">
+                <div className="mx-auto w-full max-w-3xl">
+                  <ChatComposer running={running} disabled={blocked} onSubmit={send} onStop={stop}
+                    placeholder={blocked ? "Allow Ask AI to read your files first" : "Ask about your files, or @ to mention a member"} />
+                </div>
+              </ThreadPrimitive.ViewportFooter>
+            </ThreadPrimitive.Viewport>
+          </ThreadPrimitive.Root>
+        </ChatMessageProvider>
+      </AssistantRuntimeProvider>
+    </SheetContent>
+
+    {renaming !== null && <Dialog open onOpenChange={(isOpen) => { if (!isOpen) setRenaming(null); }}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader><DialogTitle>Rename chat</DialogTitle></DialogHeader>
+        <form className="flex flex-col gap-4" onSubmit={async (event) => {
+          event.preventDefault();
+          if (!chatId) return;
+          const result = await renameChat({ id: chatId, title: renaming });
+          if (!result.success) toast.error(result.error);
+          else { void client.invalidateQueries({ queryKey: ["drive-chats"] }); setRenaming(null); }
+        }}>
+          <Input autoFocus value={renaming} maxLength={80} onChange={(event) => setRenaming(event.target.value)} aria-label="Chat title" />
+          <DialogFooter><Button type="submit" disabled={!renaming.trim()}>Save</Button></DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>}
+    {deleting && <AlertDialog open onOpenChange={(isOpen) => { if (!isOpen) setDeleting(false); }}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle className="break-words">Delete “{deleting.title}”?</AlertDialogTitle>
+          <AlertDialogTitle className="break-words">Delete “{title}”?</AlertDialogTitle>
           <AlertDialogDescription>The questions, answers and quoted passages in this chat are removed permanently.</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -290,31 +420,5 @@ export function DriveChatView({ onOpenItem }: { onOpenItem: (item: DriveItem) =>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>}
-  </AssistantRuntimeProvider>;
-}
-
-/**
- * Ask AI in a right-hand sheet. It stays mounted while closed, so a streaming answer and the open
- * chat survive closing it. A cited file opens only once the sheet has finished closing, so the two
- * modals never overlap mid-animation.
- */
-export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; onOpenChange: (open: boolean) => void; onOpenItem: (item: DriveItem) => void }) {
-  const [opening, setOpening] = useState<DriveItem | null>(null);
-  const openSource = (item: DriveItem) => {
-    setOpening(item);
-    onOpenChange(false);
-  };
-  return <Sheet open={open} onOpenChange={onOpenChange} onOpenChangeComplete={(isOpen) => {
-    if (isOpen || !opening) return;
-    setOpening(null);
-    onOpenItem(opening);
-  }}>
-    <SheetContent side="right" keepMounted className="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-3xl">
-      <SheetHeader className="border-b border-border/70 pr-12">
-        <SheetTitle>Ask AI</SheetTitle>
-        <SheetDescription>Answers from files you can open, with sources. Chats are private to you.</SheetDescription>
-      </SheetHeader>
-      <DriveChatView onOpenItem={openSource} />
-    </SheetContent>
   </Sheet>;
 }

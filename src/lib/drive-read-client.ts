@@ -68,6 +68,7 @@ export const getSearchStatus = (id: string, signal?: AbortSignal) => readDrive("
 export const searchContents = (input: SemanticSearchInput, signal?: AbortSignal) => readDrive("searchContents", [input], signal);
 export const listChats = (signal?: AbortSignal) => readDrive("listChats", [], signal);
 export const getChat = (id: string, signal?: AbortSignal) => readDrive("getChat", [id], signal);
+export const getAssistantStatus = (signal?: AbortSignal) => readDrive("getAssistantStatus", [], signal);
 
 type ThumbnailRequest = {
   id: string;

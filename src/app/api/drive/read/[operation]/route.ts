@@ -13,7 +13,7 @@ import { listVersions, getVersionDownloadUrl } from "@/app/actions/versions";
 import { getFileScanStatus, getPublicFileScanStatus } from "@/app/actions/virustotal";
 import { getPublicAccess, getPublicFolderFileAccess, getPublicFolderArchive } from "@/app/actions/public";
 import { getSearchStatus, searchContents } from "@/app/actions/search";
-import { getChat, listChats } from "@/app/actions/chat";
+import { getAssistantStatus, getChat, listChats } from "@/app/actions/chat";
 import type { DriveReadActions, DriveReadOperation } from "@/lib/drive-read-contract";
 import { isTrustedDriveRequest } from "@/lib/drive-request";
 
@@ -23,7 +23,7 @@ const reads: DriveReadActions = {
   listPinnedFolders, getStorageUsage, getThumbnailUrls, listResumableUploads,
   listVersions, getVersionDownloadUrl, getFileScanStatus, getPublicFileScanStatus,
   getPublicAccess, getPublicFolderFileAccess, getPublicFolderArchive, getSearchStatus, searchContents,
-  listChats, getChat,
+  listChats, getChat, getAssistantStatus,
 };
 const requestSchema = z.object({ args: z.array(z.unknown()).max(2) }).strict();
 
