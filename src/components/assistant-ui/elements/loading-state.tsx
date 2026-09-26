@@ -33,6 +33,9 @@ export function GenerationLoader({
   return (
     <div
       data-slot="generation-loader"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
       className={cn("flex flex-col items-center gap-4", className)}
 
       {...props}

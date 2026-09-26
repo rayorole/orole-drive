@@ -8,6 +8,8 @@ import { z } from "zod";
 import { user } from "@/lib/auth-schema";
 import { isVerifiedFamilyUser } from "@/lib/auth-policy";
 import { chatAttachmentInput, prepareChatAttachments } from "@/lib/chat-attachments";
+import { discoverChatItems, findChatItemsInput, listChatItemsInput } from "@/lib/chat-discovery";
+import type { ChatDiscoveryPage } from "@/lib/chat-discovery";
 import { driveChatMessages, driveChats } from "@/lib/chat-schema";
 import type { ChatCitation } from "@/lib/chat-schema";
 import { getDb } from "@/lib/db";
@@ -21,7 +23,7 @@ import type { ChatStreamEvent, DriveChatAttachment, DriveChatStep } from "@/lib/
 import { getPreviewKind, readTextPreview } from "@/lib/file-preview";
 import { lineDiff } from "@/lib/line-diff";
 import { openRouterModel } from "@/lib/openrouter";
-import { searchEligibility } from "@/lib/search-eligibility";
+import { searchMetadataEligibility } from "@/lib/search-eligibility";
 import { extractForSearch } from "@/lib/search-extract";
 import { loadSearchNodes } from "@/lib/search-index";
 import { semanticSearch } from "@/lib/search-query";
@@ -37,9 +39,12 @@ const QUOTE_CHARS = 280;
 export const CHAT_SYSTEM_PROMPT = `You are "Ask your drive", the assistant inside a private family cloud drive.
 
 Rules:
-- Answer only from the results of your tools and from files attached to the question. Search before answering; if the first search misses, rephrase and search again.
-- Cite every fact from a tool result with the bracketed number of its passage, like [1] or [2][3]. Numbers refer only to sources returned during this answer. Never invent a number, file or fact.
-- When the user @mentions members, their ids are listed below the question; pass ownerId to search_drive to search only files they own.
+- Answer only from the results of your tools and from files attached to the question. Use tools before answering.
+- For folder lists and filename questions, use metadata, not semantic content search. For "List my folders", call find_drive_items with query "" and kind "folder". For "What files are in my coding folder?", first call find_drive_items with query "coding" and kind "folder", then list_drive_items with the returned folderId. If multiple folders match, use their readable paths to disambiguate or ask the user; never guess an id.
+- list_drive_items lists direct children, not descendants. find_drive_items matches names throughout the accessible drive and does not require files to be indexed. Follow nextCursor using the same filters to see more results; never describe a partial page as a complete list, or an empty page with a cursor as no matches.
+- Use search_drive only for questions about file contents or meaning. If the first content search misses, rephrase and search again. A missed content search does not mean a folder or filename does not exist.
+- Cite every item or fact from a tool result with its bracketed citation number, like [1] or [2][3]. Metadata citation numbers describe names, paths and file attributes only, not contents. Empty-result and pagination facts need no citation. Numbers refer only to sources returned during this answer. Never invent a number, file or fact.
+- When the user @mentions members, their ids are listed below the question; pass ownerId to discovery and search tools to restrict results to files and folders they own. For multiple members, make a call per member. Owner filters never grant access.
 - Use compare_versions when asked what changed in a file. Use present_comparison when the user asks you to compare or choose between options; still explain the pick in text.
 - If the drive does not contain the answer, say so plainly. Do not fill gaps from general knowledge unless the user asks for that, and then say which part is not from their files.
 - Reply in the language of the user's question (often Dutch). Be concise. Use simple Markdown (short paragraphs, lists, bold) and no links.
@@ -73,7 +78,7 @@ export async function readableCitedItems(ctx: DriveContext, itemIds: string[]): 
     const nodes = await loadSearchNodes(tx, rows.map((row) => row.id));
     return new Map(rows.flatMap((row): [string, CitedItem][] => {
       const flags = access.get(row.id);
-      return flags && searchEligibility(nodes, row.id).eligible ? [[row.id, { ...row, flags }]] : [];
+      return flags && searchMetadataEligibility(nodes, row.id).eligible ? [[row.id, { ...row, flags }]] : [];
     }));
   });
 }
@@ -174,8 +179,8 @@ const comparisonInput = z.object({
 
 /**
  * Streams one answer as NDJSON events and saves it with its citations and tool steps when it finishes.
- * Every passage the model sees comes from semanticSearch, readExcerpt or compareVersions, which authorize
- * this member against Postgres at the moment of the tool call.
+ * Every passage and item the model sees is authorized against Postgres at the moment of the tool call,
+ * including metadata-only discovery of folders and files that have not been indexed.
  */
 export function answerChatTurn(ctx: DriveContext, turn: ChatTurn, signal: AbortSignal): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -210,23 +215,57 @@ export function answerChatTurn(ctx: DriveContext, turn: ChatTurn, signal: AbortS
           return `Failed: ${message}`;
         }
       };
+      const mentionedOwner = (ownerId?: string) => {
+        const owner = ownerId ? turn.mentions.find((member) => member.id === ownerId) : undefined;
+        if (ownerId && !owner) throw new DriveError("Only members mentioned in the question can be searched by owner.");
+        return owner;
+      };
+      const discoveryResult = (page: ChatDiscoveryPage) => JSON.stringify({
+        folder: page.folder ? { ...page.folder, citation: cite(page.folder.id, page.folder.name, null, null, []) } : null,
+        items: page.items.map((item) => ({ ...item, citation: cite(item.id, item.name, null, null, item.path) })),
+        nextCursor: page.nextCursor,
+        note: page.nextCursor !== null ? "More candidates remain. Continue with nextCursor and the same filters before claiming a complete list." : "End of results.",
+      });
       send({ type: "chat", chatId: turn.chatId, title: turn.title });
       const model = openRouterModel("chat");
       let text = "";
       try {
         if (!model) throw new DriveError("Ask your drive is not set up.");
         const result = streamText({
-          model, system: CHAT_SYSTEM_PROMPT, messages: turn.history, maxOutputTokens: 1_500, maxRetries: 2,
-          // Four steps at most; the last one must answer from what the tools found.
-          stopWhen: isStepCount(4), prepareStep: ({ stepNumber }) => (stepNumber >= 3 ? { toolChoice: "none" } : {}),
+          model, system: CHAT_SYSTEM_PROMPT, messages: turn.history, maxOutputTokens: 8_000, maxRetries: 2,
+          // Leave room for name resolution, folder browsing and pagination before the final answer.
+          stopWhen: isStepCount(8), prepareStep: ({ stepNumber }) => (stepNumber >= 7 ? { toolChoice: "none" } : {}),
           abortSignal: AbortSignal.any([signal, AbortSignal.timeout(110_000)]),
           tools: {
+            list_drive_items: tool({
+              description: "List authorized file/folder metadata directly inside a folder (or the drive root). Use a folder id returned by find_drive_items. No content index is required. Supports kind, mentioned owner, and bounded pagination.",
+              inputSchema: listChatItemsInput,
+              execute: async (input) => run("list_drive_items", "Drive", async () => {
+                const owner = mentionedOwner(input.ownerId);
+                const page = await discoverChatItems(ctx, { ...input, ownerId: owner?.id, mode: "list" });
+                return {
+                  result: discoveryResult(page),
+                  update: { label: page.folder?.name ?? "Drive", ...(page.folder ? { itemId: page.folder.id } : {}), summary: `${page.items.length} items${page.nextCursor !== null ? " (more available)" : ""}` },
+                };
+              }),
+            }),
+            find_drive_items: tool({
+              description: "Find authorized files and folders by name across the drive, not contents. Use kind folder and an empty query to list all folders; find a named folder here before listing its children. Names match case-insensitively. Supports mentioned owner and bounded pagination.",
+              inputSchema: findChatItemsInput,
+              execute: async (input) => run("find_drive_items", input.query || (input.kind === "folder" ? "Folders" : "Files and folders"), async () => {
+                const owner = mentionedOwner(input.ownerId);
+                const page = await discoverChatItems(ctx, { ...input, ownerId: owner?.id, mode: "find" });
+                return {
+                  result: discoveryResult(page),
+                  update: { summary: `${page.items.length} ${input.kind === "folder" ? "folders" : input.kind === "file" ? "files" : "items"}${owner ? ` owned by ${owner.name}` : ""}${page.nextCursor !== null ? " (more available)" : ""}` },
+                };
+              }),
+            }),
             search_drive: tool({
-              description: "Search the member's files by meaning and exact words. Returns numbered passages to cite. Pass ownerId to search only files owned by a mentioned member.",
+              description: "Search file CONTENTS by meaning and exact words, returning numbered passages. Not for listing folders or finding filenames; use find_drive_items/list_drive_items for metadata. Pass ownerId for a mentioned member.",
               inputSchema: z.object({ query: z.string().trim().min(1).max(500), ownerId: z.string().max(64).optional() }),
               execute: async ({ query, ownerId }) => run("search_drive", query, async () => {
-                const owner = ownerId ? turn.mentions.find((member) => member.id === ownerId) : undefined;
-                if (ownerId && !owner) throw new DriveError("Only members mentioned in the question can be searched by owner.");
+                const owner = mentionedOwner(ownerId);
                 const found = await semanticSearch(ctx, { query, limit: 8, ownerId: owner?.id });
                 const passages = found.results.flatMap((hit) => hit.passages.map((passage) =>
                   `[${cite(hit.item.id, hit.item.name, passage.location, passage.text, hit.path)}] ${hit.item.name}${passage.location ? `, ${passage.location}` : ""} (id ${hit.item.id}): ${passage.text}`));
@@ -238,7 +277,7 @@ export function answerChatTurn(ctx: DriveContext, turn: ChatTurn, signal: AbortS
               }),
             }),
             read_file_excerpt: tool({
-              description: "Read up to 8,000 characters of one file found by search_drive, by its id, when a passage is not enough.",
+              description: "Read up to 8,000 characters of a file found by search_drive, find_drive_items or list_drive_items, by its id, when metadata or a passage is not enough.",
               inputSchema: z.object({ itemId: z.uuid() }),
               execute: async ({ itemId }) => run("read_file_excerpt", "file", async () => {
                 const excerpt = await readExcerpt(ctx, itemId, signal).catch(() => null);

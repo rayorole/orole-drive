@@ -48,7 +48,7 @@ export async function getChat(id: string): Promise<ActionResult<DriveChat>> {
       messages: messages.map((message) => ({
         id: message.id, role: message.role, content: message.content, createdAt: message.createdAt.toISOString(),
         attachments: message.attachments, feedback: message.feedback,
-        steps: message.steps.map((step) => step.itemId && !readable.has(step.itemId) ? { ...step, label: "Unavailable file", diff: undefined } : step),
+        steps: message.steps.map((step) => step.itemId && !readable.has(step.itemId) ? { ...step, label: step.tool === "list_drive_items" ? "Unavailable folder" : "Unavailable file", diff: undefined } : step),
         citations: message.citations.map((citation) => {
           const row = readable.get(citation.itemId);
           return row

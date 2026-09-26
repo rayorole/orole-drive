@@ -73,7 +73,7 @@ export type DriveChatComparison = {
   recommendedId: string;
   reason: string;
 };
-export type DriveChatToolName = "search_drive" | "read_file_excerpt" | "compare_versions" | "present_comparison";
+export type DriveChatToolName = "list_drive_items" | "find_drive_items" | "search_drive" | "read_file_excerpt" | "compare_versions" | "present_comparison";
 /**
  * One tool call in an answer. `label` is what the call was about (a query or a file name); `diff` holds
  * compared file lines and is dropped when the member can no longer open `itemId`.

@@ -188,6 +188,8 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
 
   function switchTo(id: string | null) {
     abort.current?.abort();
+    abort.current = null;
+    setRegeneratingId(null);
     setPending(null);
     setHiddenId(null);
     setRunning(false);
@@ -197,6 +199,7 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
   }
 
   async function run(input: Record<string, unknown>, entries: ChatEntry[], assistantId: string) {
+    abort.current?.abort();
     const update = (change: (entry: ChatEntry) => ChatEntry) => setPending((current) => current && current.map((entry) => entry.id === assistantId ? change(entry) : entry));
     setPending(entries);
     setRunning(true);
@@ -206,6 +209,7 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
     let failed = false;
     try {
       await streamAnswer({ ...input, chatId, assistantMessageId: assistantId }, (event) => {
+        if (controller.signal.aborted || abort.current !== controller || failed) return;
         if (event.type === "chat") {
           target = event.chatId;
           setChatId(event.chatId);
@@ -219,6 +223,7 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
         else if (event.type === "error") {
           failed = true;
           update((entry) => ({ ...entry, status: "error", error: event.message }));
+          setRunning(false);
         }
       }, controller.signal);
     } catch (error) {
@@ -226,13 +231,16 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
       failed = true;
       update((entry) => ({ ...entry, status: "error", error: error instanceof Error ? error.message : "The question could not be sent." }));
     } finally {
-      if (abort.current === controller) setRunning(false);
-      setRegeneratingId(null);
+      if (abort.current === controller) {
+        update((entry) => entry.status === "running" ? { ...entry, status: "complete" } : entry);
+        setRunning(false);
+        setRegeneratingId(null);
+      }
     }
     // The saved answer, with citations checked against current access, replaces the streamed draft.
     if (target) await client.invalidateQueries({ queryKey: ["drive-chat", target] });
     void client.invalidateQueries({ queryKey: ["drive-chats"] });
-    if (!failed) { setPending(null); setHiddenId(null); }
+    if (!failed && abort.current === controller) { setPending(null); setHiddenId(null); }
   }
 
   const draftAssistant = (id: string): ChatEntry => ({ id, role: "assistant", content: "", createdAt: new Date().toISOString(), citations: [], steps: [], attachments: [], feedback: null, status: "running" });
@@ -259,6 +267,8 @@ export function AskAiSheet({ open, onOpenChange, onOpenItem }: { open: boolean; 
 
   function stop() {
     abort.current?.abort();
+    abort.current = null;
+    setRegeneratingId(null);
     setRunning(false);
     setPending((current) => current && current.map((entry) => entry.status === "running" ? { ...entry, status: "error", error: "Stopped." } : entry));
   }

@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useEffect, useState } from "react";
 import { MessagePrimitive, useAuiState, type TextMessagePartComponent } from "@assistant-ui/react";
-import { BookOpenText, FileDiff, Scale, Search } from "lucide-react";
+import { BookOpenText, FileDiff, FolderOpen, FolderSearch, Scale, Search } from "lucide-react";
 import type { DriveChatCitation, DriveChatStep, DriveItem } from "@/lib/drive-types";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { CodeDiff } from "@/components/assistant-ui/elements/code-diff";
@@ -127,6 +127,8 @@ export function ChatUserMessage() {
 
 const STEP_VERBS: Record<DriveChatStep["tool"], { verb: string; active: string; icon: TimelineStep["icon"] }> = {
   search_drive: { verb: "Searched", active: "Searching", icon: Search },
+  list_drive_items: { verb: "Listed", active: "Listing", icon: FolderOpen },
+  find_drive_items: { verb: "Found items matching", active: "Finding", icon: FolderSearch },
   read_file_excerpt: { verb: "Read", active: "Reading", icon: BookOpenText },
   compare_versions: { verb: "Compared versions of", active: "Comparing versions of", icon: FileDiff },
   present_comparison: { verb: "Weighed", active: "Weighing", icon: Scale },
@@ -137,6 +139,8 @@ function stepsLabel(steps: DriveChatStep[]) {
   const reads = steps.filter((step) => step.tool === "read_file_excerpt").length;
   const parts = [
     searches && `searched ${searches === 1 ? "once" : `${searches} times`}`,
+    steps.some((step) => step.tool === "list_drive_items") && "browsed folders",
+    steps.some((step) => step.tool === "find_drive_items") && "looked up items",
     reads && `read ${reads} ${reads === 1 ? "file" : "files"}`,
     steps.some((step) => step.tool === "compare_versions") && "compared versions",
     steps.some((step) => step.tool === "present_comparison") && "weighed options",
@@ -153,7 +157,7 @@ function Steps({ steps, running }: { steps: DriveChatStep[]; running: boolean })
   if (work.length === 1 && work[0].tool === "search_drive") {
     const step = work[0];
     return <ToolCall label="Searched your files" activeLabel="Searching your files" query={step.label}
-      request={`search_drive(“${step.label}”)`} result={step.summary ?? "…"} running={step.status === "running"} open={open} onOpenChange={setOpen} className="max-w-none" />;
+      request={`search_drive(“${step.label}”)`} result={step.summary ?? "…"} running={running && step.status === "running"} open={open} onOpenChange={setOpen} className="max-w-none" />;
   }
   return <ToolTimeline
     steps={work.map((step) => ({ verb: STEP_VERBS[step.tool].verb, chip: step.label, icon: STEP_VERBS[step.tool].icon }))}
@@ -175,22 +179,35 @@ function sourceTree(citations: DriveChatCitation[]): FileTreeNode[] {
       if (!seen.has(path)) { seen.add(path); nodes.push({ path, name, depth, kind: "folder" }); }
     });
     const path = `${folders.join("/")}/${citation.itemId}`;
-    if (!seen.has(path)) { seen.add(path); nodes.push({ path, name: citation.name, depth: folders.length, kind: "file" }); }
+    if (!seen.has(path)) { seen.add(path); nodes.push({ path, name: citation.name, depth: folders.length, kind: citation.item.kind === "folder" ? "folder" : "file" }); }
   }
   return nodes;
+}
+
+/** Source cards represent items; citation numbers still identify individual passages. */
+function groupCitations(citations: DriveChatCitation[]) {
+  const groups = new Map<string, DriveChatCitation[]>();
+  for (const citation of citations) {
+    const group = groups.get(citation.itemId);
+    if (group) group.push(citation);
+    else groups.set(citation.itemId, [citation]);
+  }
+  return [...groups.values()];
 }
 
 /** Cited documents with their quoted passages, grouped per file; unavailable files have none. */
 function DocumentReferences({ citations, onOpen }: { citations: DriveChatCitation[]; onOpen: (item: DriveItem) => void }) {
   const files = [...new Map(citations.filter((citation) => citation.item && citation.quote).map((citation) => [citation.itemId, citation])).values()];
   return <>{files.map((file) => {
-    const anchors = citations.filter((citation) => citation.itemId === file.itemId && citation.quote).map((citation) => {
+    const anchors = citations.filter((citation) => citation.itemId === file.itemId && citation.item && citation.quote).map((citation) => {
       const page = /^page (\d+)$/.exec(citation.location ?? "")?.[1];
       return { page: page ? Number(page) : citation.n, label: page ? undefined : citation.location ?? `source ${citation.n}`, quote: citation.quote! };
     });
     return <DocumentReference key={file.itemId} title={file.name} anchors={anchors} activePage={-1} onJump={() => onOpen(file.item!)} className="max-w-none" />;
   })}</>;
 }
+
+const NoMessageFallback = () => null;
 
 export function ChatAssistantMessage() {
   const { context, entry } = useChatMessage();
@@ -203,7 +220,7 @@ export function ChatAssistantMessage() {
     return () => window.clearTimeout(timer);
   }, [copied]);
   if (!entry) return null;
-  const running = entry.status === "running";
+  const running = context.running && entry.status === "running";
   const failedSteps = entry.steps.filter((step) => step.status === "error");
   const canRegenerate = entry.id === context.lastAssistantId && !context.running;
   const regenerating = context.regeneratingId === entry.id;
@@ -213,19 +230,23 @@ export function ChatAssistantMessage() {
       <Steps steps={entry.steps} running={running} />
       {failedSteps.map((step) => <ToolError key={step.id} name={step.tool} target={step.label} message={step.error ?? "The tool failed."} attempt={1} maxAttempts={1}
         retrying={regenerating} onRetry={canRegenerate ? context.onRegenerate : undefined} className="max-w-none" />)}
-      {running && !entry.content && !entry.steps.some((step) => step.status === "running") && <AwaitingFirstToken />}
-      {entry.content && <div className="w-full break-words"><MessagePrimitive.Parts components={{ Text: CitedMarkdownText }} /></div>}
+      {entry.content && <div className="w-full break-words"><MessagePrimitive.Parts components={{ Text: CitedMarkdownText, Empty: NoMessageFallback }} /></div>}
+      {running && !entry.steps.some((step) => step.status === "running") && <AnswerProgress label={entry.content.trim() ? "Writing" : "Thinking"} />}
       {entry.steps.flatMap((step) => step.comparison ? [<ComparisonCard key={step.id} {...step.comparison} className="max-w-none" />] : [])}
       {entry.steps.flatMap((step) => step.diff && step.diff.lines.length ? [<CodeDiff key={step.id} filename={step.diff.filename} additions={step.diff.additions} deletions={step.diff.deletions} lines={step.diff.lines} cycle={0} className="max-w-none" />] : [])}
       {entry.status === "error" && <ErrorState title="The answer didn't finish" detail={entry.error ?? "Please try again."} retrying={regenerating} onRetry={canRegenerate ? context.onRegenerate : () => {}} className="max-w-none" />}
       {entry.citations.length > 0 && <Sources open={sourcesOpen} onOpenChange={setSourcesOpen} className="max-w-none"
-        sources={entry.citations.map((citation) => ({
-          id: String(citation.n),
-          domain: citation.item ? (citation.path.length ? citation.path.join(" / ") : "My drive") : "No longer available",
-          title: `${citation.n}. ${citation.name}${citation.location ? ` · ${citation.location}` : ""}`,
-          disabled: !citation.item,
-          onSelect: citation.item ? () => context.onOpenItem(citation.item!) : undefined,
-        }))} />}
+        sources={groupCitations(entry.citations).map((citations) => {
+          const citation = citations[0];
+          const item = citations.find((source) => source.item)?.item;
+          return {
+            id: citation.itemId,
+            domain: item ? (citation.path.length ? citation.path.join(" / ") : "My drive") : "No longer available",
+            title: `${citations.map((source) => source.n).join(", ")}. ${citation.name}`,
+            disabled: !item,
+            onSelect: item ? () => context.onOpenItem(item) : undefined,
+          };
+        })} />}
       {!running && entry.status !== "error" && <MessageActions data-hover-actions
         copied={copied} reaction={entry.feedback} regenerating={regenerating}
         onCopy={() => { void navigator.clipboard.writeText(entry.content).then(() => setCopied(true)); }}
@@ -242,11 +263,11 @@ export function ChatAssistantMessage() {
   </MessagePrimitive.Root>;
 }
 
-function AwaitingFirstToken() {
+function AnswerProgress({ label }: { label: string }) {
   const [tick, setTick] = useState(0);
   useEffect(() => {
     const timer = window.setInterval(() => setTick((value) => value + 1), 120);
     return () => window.clearInterval(timer);
   }, []);
-  return <GenerationLoader label="Thinking" tick={tick} className="items-start py-1" />;
+  return <GenerationLoader label={label} tick={tick} className="items-start py-1" />;
 }

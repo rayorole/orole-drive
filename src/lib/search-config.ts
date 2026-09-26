@@ -24,7 +24,7 @@ export function searchConfig(): SearchConfig | null {
     index: env("VECTORIZE_INDEX") ?? "orole-drive-search",
     openRouterKey: env("OPENROUTER_API_KEY") ?? "",
     captionModel: env("SEARCH_CAPTION_MODEL") ?? "anthropic/claude-haiku-4.5",
-    chatModel: env("SEARCH_CHAT_MODEL") ?? "anthropic/claude-sonnet-5",
+    chatModel: env("SEARCH_CHAT_MODEL") ?? "z-ai/glm-5.3-flash",
   };
 }
 

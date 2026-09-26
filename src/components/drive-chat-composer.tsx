@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { SlidersHorizontal } from "lucide-react";
 import { getAssistantStatus, listShareMembers } from "@/lib/drive-read-client";
@@ -12,6 +12,7 @@ import { McpServerPanel, type McpServer } from "@/components/assistant-ui/elemen
 import { ghostButton } from "@/components/assistant-ui/elements/surfaces";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { profileAvatarUrl } from "@/lib/profile-avatar";
 
 /** Keep in step with CHAT_ATTACHMENT_MAX_BYTES on the server (Vercel's request body limit). */
 const MAX_ATTACHMENT_BYTES = 3 * 1_048_576;
@@ -64,7 +65,7 @@ export function ChatComposer({ running, disabled, placeholder, onSubmit, onStop 
     },
     staleTime: 5 * 60_000,
   });
-  const people = (members.data ?? []).map((member) => ({ id: member.id, name: member.name || member.email, role: "human" as const }));
+  const people = useMemo(() => (members.data ?? []).map((member) => ({ id: member.id, name: member.name || member.email, avatarUrl: profileAvatarUrl(member), role: "human" as const })), [members.data]);
   const matches = useMentionMatches(value, people).slice(0, 6);
   const mentionOpen = matches.length > 0 && !disabled;
   const uploading = staged.some((file) => file.state === "uploading");
@@ -111,7 +112,7 @@ export function ChatComposer({ running, disabled, placeholder, onSubmit, onStop 
   }
 
   const servers: McpServer[] = [
-    { id: "drive", name: "Orole Drive", transport: "built in · your access", status: "connected", tools: ["search_drive", "read_file_excerpt", "compare_versions", "present_comparison"] },
+    { id: "drive", name: "Orole Drive", transport: "built in · your access", status: "connected", tools: ["list_drive_items", "find_drive_items", "search_drive", "read_file_excerpt", "compare_versions", "present_comparison"] },
     { id: "index", name: "Semantic index", transport: "Cloudflare Workers AI + Vectorize", status: status.data ? (status.data.semanticIndex ? "connected" : "failed") : "connecting", tools: ["bge-m3 embeddings", "vector search", "keyword search"] },
     { id: "model", name: "Language model", transport: "OpenRouter", status: status.data ? (status.data.model ? "connected" : "failed") : "connecting", tools: status.data?.model ? [status.data.model] : [] },
   ];
