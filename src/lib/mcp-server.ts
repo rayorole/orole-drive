@@ -18,11 +18,13 @@ import {
   trashItems,
   beginUpload,
 } from "@/app/actions/drive";
+import { resumeUpload } from "@/app/actions/uploads";
 import { assertItemAccess, driveAction, getItemAccess, runWithDriveContext, withDriveTransaction } from "@/lib/drive-access";
 import type { DriveActor } from "@/lib/drive-access";
 import { DriveError } from "@/lib/drive-errors";
 import { driveItems } from "@/lib/drive-schema";
-import type { ActionResult, ConflictResolution, ConflictResolutions, DriveItem, UploadResolution } from "@/lib/drive-types";
+import { MAX_UPLOAD_BYTES } from "@/lib/drive-types";
+import type { ActionResult, ConflictResolution, ConflictResolutions, DriveItem, UploadResolution, UploadTicket } from "@/lib/drive-types";
 import { getPreviewKind, readTextPreview } from "@/lib/file-preview";
 import { downloadBoundedBytes, extractPdfText, PDF_TEXT_MAX_BYTES, pdfPlainText } from "@/lib/pdf-text";
 import { toDriveItem } from "@/lib/storage";
@@ -42,6 +44,9 @@ const dateParam = z.iso.date();
 const typeFilterParam = z.enum(["all", "folder", "image", "video", "audio", "pdf", "text", "code", "archive", "other"]);
 const sortParam = z.enum(["name", "updatedAt", "size", "type"]);
 const directionParam = z.enum(["asc", "desc"]);
+const uploadConflictParam = z.enum(["replace", "keep-both"]).optional().describe(
+  "When a file with this name already exists: replace saves the upload as its new version (the previous contents stay in its version history), keep-both saves under a numbered name. Folders can't be replaced.",
+);
 const onConflictParam = z.enum(["replace", "keep-both", "skip"]).default("keep-both").describe(
   "When the destination already has an item with the same name: keep-both (default) numbers the incoming name, skip leaves the item out, replace moves the existing item to Trash (needs Trash access and the user's confirmation).",
 );
@@ -101,31 +106,57 @@ async function readFileTool(actor: DriveActor, id: string): Promise<CallToolResu
   };
 }
 
-async function writeFileTool(actor: DriveActor, input: { name: string; parentId: string | null; content: string; mimeType: string; onConflict?: UploadResolution }): Promise<CallToolResult> {
-  const size = Buffer.byteLength(input.content, "utf8");
-  if (size > MCP_WRITE_FILE_MAX_BYTES) {
-    return { content: [{ type: "text", text: `That content is ${size} bytes, over the ${MCP_WRITE_FILE_MAX_BYTES}-byte limit for write_file. Upload larger files through the app instead.` }], isError: true };
-  }
-  const request = { name: input.name, size, mimeType: input.mimeType, parentId: input.parentId };
+/** Starts an upload, turning a name conflict into an actionable tool error unless `onConflict` resolves it. */
+async function startMcpUpload(actor: DriveActor, tool: string, request: { name: string; size: number; mimeType: string; parentId: string | null }, onConflict?: UploadResolution): Promise<{ ticket: UploadTicket } | { error: CallToolResult }> {
   let ticketResult = await runWithDriveContext(actor, () => beginUpload(request));
   const conflict = ticketResult.success ? undefined : ticketResult.conflicts?.[0];
   if (conflict) {
-    if (!input.onConflict) {
-      return { content: [{ type: "text", text: `${conflict.existingKind === "folder" ? "A folder" : "A file"} named “${conflict.name}” already exists there. Call write_file again with onConflict "replace" (a file's current contents are kept in its version history) or "keep-both" (saves under a numbered name).` }], isError: true };
+    if (!onConflict) {
+      return { error: { content: [{ type: "text", text: `${conflict.existingKind === "folder" ? "A folder" : "A file"} named “${conflict.name}” already exists there. Call ${tool} again with onConflict "replace" (a file's current contents are kept in its version history) or "keep-both" (saves under a numbered name).` }], isError: true } };
     }
-    if (input.onConflict === "replace" && conflict.existingKind === "folder") {
-      return { content: [{ type: "text", text: `“${conflict.name}” is a folder, so write_file can't replace it. Use onConflict "keep-both", or move the folder to Trash first with trash_item.` }], isError: true };
+    if (onConflict === "replace" && conflict.existingKind === "folder") {
+      return { error: { content: [{ type: "text", text: `“${conflict.name}” is a folder, so ${tool} can't replace it. Use onConflict "keep-both", or move the folder to Trash first with trash_item.` }], isError: true } };
     }
-    ticketResult = await runWithDriveContext(actor, () => beginUpload({ ...request, resolution: input.onConflict }));
+    ticketResult = await runWithDriveContext(actor, () => beginUpload({ ...request, resolution: onConflict }));
   }
-  if (!ticketResult.success) return toolResult(ticketResult);
-  const ticket = ticketResult.data;
+  return ticketResult.success ? { ticket: ticketResult.data } : { error: toolResult(ticketResult) };
+}
+
+/** Upload instructions for an agent holding a ticket; the signed URLs are the only credential the PUTs need. */
+function uploadTicketResult(ticket: UploadTicket, size?: number): CallToolResult {
+  const bytes = size === undefined ? "the file's exact bytes" : `the file's exact ${size} bytes`;
+  const steps = ticket.mode === "single"
+    ? `PUT ${bytes} to "url" with every header in "headers" (unchanged) and the matching Content-Length. For example: curl --fail -X PUT --upload-file <path> ${Object.entries(ticket.headers).map(([name, value]) => `-H '${name}: ${value}'`).join(" ")} '<url>'. The URL expires in 1 hour.`
+    : `PUT each part to its URL: part N is bytes (N-1)*${ticket.partSize} up to N*${ticket.partSize} of the file (the last part is shorter), sent with its exact Content-Length and no other headers. For example: dd if=<path> bs=${ticket.partSize} skip=$((N-1)) count=1 | curl --fail -X PUT --data-binary @- '<part url>'. Parts can go in parallel and a failed part can be re-sent. The URLs expire in 24 hours; resume_upload signs fresh ones for the parts still missing.`;
+  const text = `Upload started (uploadId ${ticket.id}). ${steps} Then call complete_upload with this uploadId. If you give up, call cancel_upload.`;
+  const structured: Record<string, unknown> = { uploadId: ticket.id, ...(size === undefined ? {} : { size }), ...ticket };
+  return { content: [{ type: "text", text: `${text}\n\n${JSON.stringify(structured, null, 2)}` }], structuredContent: structured };
+}
+
+async function writeFileTool(actor: DriveActor, input: { name: string; parentId: string | null; content: string; contentEncoding: "utf8" | "base64"; mimeType: string; onConflict?: UploadResolution }): Promise<CallToolResult> {
+  let body: Buffer;
+  if (input.contentEncoding === "base64") {
+    const encoded = input.content.replace(/\s+/g, "");
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+      return { content: [{ type: "text", text: "content is not valid base64. Send standard base64 (A–Z, a–z, 0–9, +, / with = padding)." }], isError: true };
+    }
+    body = Buffer.from(encoded, "base64");
+  } else {
+    body = Buffer.from(input.content, "utf8");
+  }
+  const size = body.byteLength;
+  if (size > MCP_WRITE_FILE_MAX_BYTES) {
+    return { content: [{ type: "text", text: `That content is ${size} bytes, over the ${MCP_WRITE_FILE_MAX_BYTES}-byte limit for write_file. Use begin_upload for larger files (up to 5 GiB).` }], isError: true };
+  }
+  const started = await startMcpUpload(actor, "write_file", { name: input.name, size, mimeType: input.mimeType, parentId: input.parentId }, input.onConflict);
+  if ("error" in started) return started.error;
+  const { ticket } = started;
   if (ticket.mode !== "single") {
     await runWithDriveContext(actor, () => cancelUpload(ticket.id)).catch(() => undefined);
-    return { content: [{ type: "text", text: "That content unexpectedly needed a multipart upload. Try again with smaller content." }], isError: true };
+    return { content: [{ type: "text", text: "That content unexpectedly needed a multipart upload. Use begin_upload instead." }], isError: true };
   }
   try {
-    const response = await fetch(ticket.url, { method: "PUT", headers: ticket.headers, body: input.content });
+    const response = await fetch(ticket.url, { method: "PUT", headers: ticket.headers, body: new Uint8Array(body) });
     if (!response.ok) throw new Error(`The storage upload responded with status ${response.status}.`);
   } catch (error) {
     await runWithDriveContext(actor, () => cancelUpload(ticket.id)).catch(() => undefined);
@@ -265,18 +296,57 @@ export function createDriveMcpServer(actor: DriveActor): McpServer {
 
   server.registerTool("write_file", {
     title: "Write file",
-    description: `Writes a small text or code file (up to ${MCP_WRITE_FILE_MAX_BYTES / 1_048_576}MB) with the given contents. If the name is already taken in the folder, the call fails unless onConflict is set.`,
+    description: `Writes a file of any type (up to ${MCP_WRITE_FILE_MAX_BYTES / 1_048_576}MB) with the given contents: text as-is, or binary files (PDF, Word, images, executables, archives…) as base64 with contentEncoding "base64". For larger files use begin_upload. If the name is already taken in the folder, the call fails unless onConflict is set.`,
     inputSchema: z.object({
       name: z.string().trim().min(1).max(255),
       parentId: idParam.nullable().optional(),
       content: z.string(),
-      mimeType: z.string().trim().toLowerCase().max(127).default("text/plain"),
-      onConflict: z.enum(["replace", "keep-both"]).optional().describe(
-        "When a file with this name already exists: replace saves these contents as its new version (the previous contents stay in its version history), keep-both saves under a numbered name. Folders can't be replaced.",
-      ),
+      contentEncoding: z.enum(["utf8", "base64"]).default("utf8").describe("utf8 (default) writes content as text; base64 decodes content to the file's exact bytes."),
+      mimeType: z.string().trim().toLowerCase().max(127).default("text/plain").describe("The file's content type, e.g. application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/octet-stream."),
+      onConflict: uploadConflictParam,
     }),
     scopeChallenge: requireScopes("mcp:write"),
-  }, async ({ name, parentId, content, mimeType, onConflict }) => writeFileTool(actor, { name, parentId: parentId ?? null, content, mimeType, onConflict }));
+  }, async ({ name, parentId, content, contentEncoding, mimeType, onConflict }) => writeFileTool(actor, { name, parentId: parentId ?? null, content, contentEncoding, mimeType, onConflict }));
+
+  server.registerTool("begin_upload", {
+    title: "Begin upload",
+    description: "Starts uploading a file of any type and size (up to 5 GiB) straight to storage, without sending its bytes through MCP. Returns signed URLs to PUT the bytes to (one URL, or one per 16 MiB part for files of 64 MiB or more) and step-by-step instructions; then call complete_upload. Use this for files over 2MB or whenever you can read the file from disk.",
+    inputSchema: z.object({
+      name: z.string().trim().min(1).max(255),
+      parentId: idParam.nullable().optional(),
+      size: z.number().int().min(0).max(MAX_UPLOAD_BYTES).describe("The file's exact size in bytes."),
+      mimeType: z.string().trim().toLowerCase().max(127).default("application/octet-stream").describe("The file's content type, e.g. application/pdf. The PUT must send this same Content-Type."),
+      onConflict: uploadConflictParam,
+    }),
+    scopeChallenge: requireScopes("mcp:write"),
+  }, async ({ name, parentId, size, mimeType, onConflict }) => {
+    const started = await startMcpUpload(actor, "begin_upload", { name, size, mimeType, parentId: parentId ?? null }, onConflict);
+    return "error" in started ? started.error : uploadTicketResult(started.ticket, size);
+  });
+
+  server.registerTool("resume_upload", {
+    title: "Resume upload",
+    description: "Signs fresh upload URLs for an unfinished begin_upload (for example after they expired). For multipart uploads it lists only the parts still missing, with completedParts showing what storage already has.",
+    inputSchema: z.object({ uploadId: idParam }),
+    scopeChallenge: requireScopes("mcp:write"),
+  }, async ({ uploadId }) => {
+    const ticket = await runWithDriveContext(actor, () => resumeUpload(uploadId));
+    return ticket.success ? uploadTicketResult(ticket.data) : toolResult(ticket);
+  });
+
+  server.registerTool("complete_upload", {
+    title: "Complete upload",
+    description: "Finishes a begin_upload after every byte has been PUT: storage is checked against the declared size and type, then the file appears in the drive. Returns the new file.",
+    inputSchema: z.object({ uploadId: idParam }),
+    scopeChallenge: requireScopes("mcp:write"),
+  }, async ({ uploadId }) => toolResult(await runWithDriveContext(actor, () => completeUpload(uploadId))));
+
+  server.registerTool("cancel_upload", {
+    title: "Cancel upload",
+    description: "Discards an unfinished begin_upload and anything already sent for it.",
+    inputSchema: z.object({ uploadId: idParam }),
+    scopeChallenge: requireScopes("mcp:write"),
+  }, async ({ uploadId }) => toolResult(await runWithDriveContext(actor, () => cancelUpload(uploadId))));
 
   server.registerTool("rename_item", {
     title: "Rename item",
